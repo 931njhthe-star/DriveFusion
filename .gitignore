@@ -1,0 +1,5 @@
+.venv/
+.vs/
+__pycache__/
+*.py[cod]
+data/recordings/
