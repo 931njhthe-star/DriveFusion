@@ -3,7 +3,6 @@
 CARLA 0.9.16의 실행 중인 `hero` 차량에 프로젝트 전용 센서를 붙이고, RGB 카메라·레이더·차량 상태·IMU·GNSS·충돌·차선 이탈 데이터를 Qt 화면에 표시합니다. 측정값은 실행별 세션에 기록합니다. CARLA 설치본은 이 프로젝트 폴더 밖에 둡니다.
 
 <img width="751" height="466" alt="화면 캡처 2026-10-20 152144" src="https://github.com/user-attachments/assets/de7aeb32-e1fe-46f4-8cde-6faef600e208" />
-=======
 장기 목표는 CARLA와 분리된 C++17 Core에서 영상처리·추적·레이더 처리·센서 융합을 수행하고 Windows와 Linux에서 같은 코드로 검증하는 것입니다. 전체 폴더 구조, 현재 구현, 단계별 기술 기획은 [프로젝트 구조와 기술 기획](docs/PROJECT_OVERVIEW.md)에 정리했습니다.
 
 ## Windows 실행
