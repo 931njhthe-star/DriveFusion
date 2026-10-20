@@ -2,7 +2,7 @@
 
 CARLA 0.9.16의 실행 중인 `hero` 차량에 프로젝트 전용 센서를 붙이고, RGB 카메라·레이더·차량 상태·IMU·GNSS·충돌·차선 이탈 데이터를 Qt 화면에 표시합니다. 측정값은 실행별 세션에 기록합니다. CARLA 설치본은 이 프로젝트 폴더 밖에 둡니다.
 
-![실시간 Qt 모니터 미리보기](samples/qt_preview.png)
+<img width="751" height="466" alt="화면 캡처 2026-10-20 152144" src="https://github.com/user-attachments/assets/de7aeb32-e1fe-46f4-8cde-6faef600e208" />
 
 ## Windows 실행
 
