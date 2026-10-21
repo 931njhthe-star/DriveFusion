@@ -22,7 +22,10 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 <img width="1672" height="940" alt="flow" src="https://github.com/user-attachments/assets/8133445e-add3-4e75-9d26-4ab0d1940032" />
 
 
-YOLO11n 검출기는 TensorRTx의 **C++/CUDA DLL**과 TensorRT 엔진으로 실행합니다. Python 작업자가 카메라 프레임을 DLL에 전달하고, 검출 결과를 추적 알고리즘과 연결합니다. 추적·레이더 점 처리·거리 계산·Qt 화면·기록·평가는 현재 Python으로 구현되어 있습니다. 따라서 프로젝트 전체가 C++로 작성된 것은 아닙니다.
+**C++/CUDA**
+YOLO11n 검출기는 TensorRTx의 C++/CUDA DLL과 TensorRT 엔진으로 실행합니다. 
+**Python**
+작업자가 카메라 프레임을 DLL에 전달하고, 검출 결과를 추적 알고리즘과 연결합니다. 추적·레이더 점 처리·거리 계산·Qt 화면·기록·평가는 현재 Python으로 구현되어 있습니다.
 
 | 처리 | 현재 하는 일 |
 | --- | --- | --- |
@@ -31,21 +34,8 @@ YOLO11n 검출기는 TensorRTx의 **C++/CUDA DLL**과 TensorRT 엔진으로 실�
 | 센서 융합 | 레이더 점을 영상에 투영해 차량 상자와 연결하고, 유효한 가까운 점 묶음으로 카메라 거리 추정을 보정 |
 | 화면과 평가 | 원본·검출·추적·융합 화면을 비교하고, 저장 세션에서 추정 거리와 CARLA 정답을 비교 |
 
-장기적으로는 추적과 융합 처리도 독립 C++ Core로 옮겨 Windows/Linux에서 검증할 계획입니다. 현재 구현 범위와 남은 작업은 [프로젝트 개요](docs/PROJECT_OVERVIEW.md), 거리 계산의 전체 규칙은 [거리 추정 기록](docs/DISTANCE_ESTIMATION.md)에 정리했습니다.
+현재 구현 범위와 남은 작업은 [프로젝트 개요](docs/PROJECT_OVERVIEW.md), 거리 계산의 전체 규칙은 [거리 추정 기록](docs/DISTANCE_ESTIMATION.md)에 정리했습니다.
 
-## Windows 실행
-
-CARLA와 `hero` 차량을 먼저 실행하세요. 이 프로젝트는 시뮬레이션 맵이나 동기화 설정을 변경하거나 서버를 직접 tick하지 않습니다.
-
-```powershell
-cd C:\programming\carla
-uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -r requirements.txt
-uv pip install --python .venv\Scripts\python.exe "C:\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl"
-.\.venv\Scripts\python.exe -m monitor.qt.app
-```
-
-다른 CARLA 서버나 차량 역할을 사용할 경우 `--host`, `--port`, `--role`을 지정할 수 있습니다. 예: `--role hero --port 2000`.
 
 ## YOLO11n 실시간 검출
 
@@ -105,3 +95,18 @@ PowerShell에서 실행하려면:
 저장 영상을 비교하려면 **저장 세션 전체 비교 영상 생성**을 누르고 `*_radar_fusion` 세션을 선택하세요. 원본, YOLO, 일반 트래킹, 레이더 융합 트래킹을 2×2 화면에 담은 `comparison_videos/all_views.mp4`를 만듭니다. 새 기록은 일반 트래킹과 융합 트랙을 각각 저장합니다. 예전 융합 기록에 `vision_tracks.jsonl`이 없으면 저장된 YOLO 검출을 다시 재생해 일반 트래킹 기준선을 복원합니다. 탐지·일반 트래킹·레이더 융합 오버레이 이미지도 각각 `annotated/`, `tracked/`, `radar_fusion/`에 생성합니다. MP4 인코딩을 위해 `ffmpeg`가 설치되어 PATH에서 실행 가능해야 합니다. 원본 JPEG와 JSONL은 수정하지 않으며, 생성 작업은 백그라운드에서 실행됩니다.
 
 Qt 앱이 만든 센서만 종료 시 제거하며, 기존 차량과 기존 센서는 유지합니다.
+
+
+## Windows 실행
+
+CARLA와 `hero` 차량을 먼저 실행하세요. 이 프로젝트는 시뮬레이션 맵이나 동기화 설정을 변경하거나 서버를 직접 tick하지 않습니다.
+
+```powershell
+cd C:\programming\carla
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+uv pip install --python .venv\Scripts\python.exe "C:\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl"
+.\.venv\Scripts\python.exe -m monitor.qt.app
+```
+
+다른 CARLA 서버나 차량 역할을 사용할 경우 `--host`, `--port`, `--role`을 지정할 수 있습니다. 예: `--role hero --port 2000`.
