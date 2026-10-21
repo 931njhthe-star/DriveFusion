@@ -20,6 +20,7 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 
 ## 어떻게 동작하나요?
 <img width="1672" height="940" alt="flow" src="https://github.com/user-attachments/assets/8133445e-add3-4e75-9d26-4ab0d1940032" />
+
 ```text
 CARLA 주행 장면
   ├─ RGB 카메라 영상 → C++/CUDA YOLO11n 차량 검출 → 차량별 ID 추적
