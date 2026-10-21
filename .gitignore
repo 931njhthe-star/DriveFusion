@@ -1,5 +1,8 @@
 .venv/
 .vs/
+build/
 __pycache__/
 *.py[cod]
-data/recordings/
+/data/
+/flow.png
+/실행법.txt

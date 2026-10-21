@@ -1,12 +1,12 @@
-# CARLA RadarVision — 프로젝트 구조와 기술 기획
+# CARLA RadarVision — 프로젝트 개요와 진행 현황
 
-> 기준: 2026-10-20 작업 트리. **현재**는 코드에서 확인한 상태, **목표**는 사용자가 제시한 원 기획, **계획**은 아직 구현되지 않은 작업이다.
+> 기준: 2026-10-21 작업 트리. **현재**는 Python/Qt 프로토타입에서 확인한 상태, **목표**는 C++ Core를 포함한 원 기획, **계획**은 아직 구현되지 않은 작업이다.
 
 ## 1. 프로젝트 개요
 
 CARLA의 카메라·레이더 데이터를 외부 프로그램으로 수집하고, **CARLA와 분리된 C++17 Core**에서 영상처리·객체 추적·레이더 처리·센서 융합·이벤트 검출을 수행한다. 원본과 처리 결과를 Qt 검증 도구와 웹 대시보드에 표시하고, 알고리즘 정확도와 실시간 처리 성능을 독립적으로 측정한다. 이 프로젝트는 C++ 응용 개발, Windows/Linux 빌드, 신호처리, OpenCV 비전, 센서 융합 역량을 재현 가능한 코드와 측정 결과로 보여주는 포트폴리오를 목표로 한다.
 
-현재 구현은 Windows용 Python/PySide6 수집·표시·기록 프로토타입이다. CARLA 서버와 `hero` 역할의 차량은 별도로 실행해야 한다.
+현재는 Windows용 Python/PySide6 프로토타입에서 Phase 4의 카메라·레이더 거리 융합과 저장 세션 평가까지 구현했다. YOLO 추론에는 별도로 빌드한 TensorRTx C++/CUDA DLL을 사용한다. CARLA 서버와 `hero` 역할의 차량은 별도로 실행해야 한다. 프로젝트 자체의 독립 C++ Core와 DSP 모듈, 융합 기반 이벤트 검출은 남은 작업이다.
 
 ### 목표
 
@@ -23,8 +23,8 @@ CARLA의 카메라·레이더 데이터를 외부 프로그램으로 수집하�
 | 시뮬레이터 | CARLA 0.9.16, Town02, 차량 5~10대 | CARLA 0.9.16 연결 코드와 `hero` 차량 검색 구현. Town02·차량 수는 검증 조건 |
 | 개발·실행 OS | Windows 11, WSL2 Ubuntu 24.04 | Python Qt 앱은 Windows에서 구현. Linux Core 빌드는 미구현 |
 | GPU·입력 | RTX 4070 SUPER 12GB, RGB 640×480, 레이더 1대 | GPU 확인. 카메라·레이더 부착 구현 |
-| 처리 | C++17, OpenCV, CMake, MSVC/GCC | Core·빌드 파일 미구현 |
-| 표시·저장 | Qt 6, FastAPI/WebSocket/React, 파일 후 SQLite 검토 | PySide6 Qt 화면과 JPEG/JSONL 기록 구현. 웹·DB 미구현 |
+| 처리 | C++17, OpenCV, CMake, MSVC/GCC | 외부 TensorRTx YOLO DLL과 Python 추적·레이더 처리·거리 융합·평가 구현. 독립 C++ Core와 루트 빌드 파일 미구현 |
+| 표시·저장 | Qt 6, FastAPI/WebSocket/React, 파일 후 SQLite 검토 | PySide6 Qt 비교 화면, JPEG/JSONL 기록, MP4 비교 영상, 3~15m 실험 보고서 구현. 웹·DB 미구현 |
 | 선택 기능 | LangGraph/LLM API | 필수 완료 기준에 포함하지 않음 |
 
 ### 현재 범위와 운영 원칙
@@ -32,41 +32,40 @@ CARLA의 카메라·레이더 데이터를 외부 프로그램으로 수집하�
 - 실행 중인 CARLA 월드에서 지정한 `role_name`의 차량을 찾아 센서를 부착한다. 차량이 없거나 연결이 끊기면 재연결을 시도한다.
 - 시뮬레이션 맵과 동기화 설정을 바꾸거나 서버를 직접 tick하지 않는다.
 - 앱 종료 시 이 앱이 만든 센서만 제거한다. 기존 차량과 다른 센서는 유지한다.
-- 현 단계에서 실제 구현은 `collector/live.py`와 `monitor/qt/app.py`에 집중되어 있다. 분석 엔진, 웹 화면, 전송 계층은 아직 구현되지 않았다.
+- 현재 분석 경로는 `core/yolo11_detector.py`와 `monitor/qt/`의 작업자·추적·위치 추정·실험 평가 모듈에 구현되어 있다. 별도 C++ Core, 웹 화면, 전송 계층은 아직 구현되지 않았다.
 
 ## 2. 전체 폴더 구조
 
-아래 트리는 프로젝트 루트의 실제 폴더와 주요 파일을 나타낸다. `[비어 있음]`은 현재 파일이 없는 디렉터리다. `.git/`, `.venv/`, `.vs/`, `data/recordings/`에는 생성 파일이 많아 내부 파일을 나열하지 않았다.
+아래 트리는 주요 소스와 문서, 계획된 디렉터리를 나타낸다. `[비어 있음]`은 현재 구현 파일이 없는 디렉터리다. 환경·생성 파일과 개별 기록 세션은 생략했다.
 
 ```text
 carla/
-├─ .git/                         Git 내부 데이터
-├─ .venv/                        로컬 Python 가상환경 (Git 제외)
-├─ .vs/                          IDE 생성 파일 (Git 제외)
 ├─ benchmarks/                   [비어 있음] 성능 측정용 자리
 ├─ collector/
-│  ├─ live.py                     CARLA 센서 수집, 공유 상태, 세션 기록
-│  └─ __pycache__/                Python 생성 파일 (Git 제외)
+│  └─ live.py                     CARLA 센서 수집, 프레임 정렬, 세션 기록
 ├─ configs/                      [비어 있음] 실행 설정용 자리
 ├─ core/
+│  ├─ yolo11_detector.py          TensorRTx C++/CUDA DLL의 Python 연결
 │  ├─ include/                   [비어 있음]
 │  ├─ src/                       [비어 있음]
 │  └─ tests/                     [비어 있음]
 ├─ data/
-│  ├─ recordings/                실행별 세션 데이터 (Git 제외)
-│  │  └─ YYYYMMDD_HHMMSS_ffffff/
-│  │     ├─ session.json
-│  │     ├─ measurements.jsonl
-│  │     └─ camera/
-│  │        └─ <sensor_id>_<frame>.jpg
-│  ├─ 화면 캡처 2026-10-20 151919.png
-│  └─ 화면 캡처 2026-10-20 152144.png
+│  └─ recordings/                실행별 JPEG/JSONL 세션과 평가 결과 (Git 제외)
 ├─ docs/
-│  └─ PROJECT_OVERVIEW.md         이 문서
+│  ├─ PROJECT_OVERVIEW.md         이 문서
+│  ├─ DISTANCE_ESTIMATION.md     차체 간 거리 정의·융합 규칙·평가 결과
+│  ├─ PORTFOLIO_PLAN.md          포트폴리오 방향·설계 결정
+│  ├─ PATENT_REFERENCES.md       특허 참고 자료
+│  └─ PHASE_1_5_CMAKE.md         TensorRTx 빌드·검증 기록
 ├─ monitor/
 │  ├─ backend/                   [비어 있음]
 │  ├─ qt/
-│  │  └─ app.py                  PySide6 실시간 모니터와 실행 진입점
+│  │  ├─ app.py                  PySide6 모니터와 실행 진입점
+│  │  ├─ yolo_worker.py          실시간 YOLO 작업자
+│  │  ├─ tracker.py              영상·레이더 보조 추적
+│  │  ├─ positioning.py          카메라·레이더 위치 및 거리 추정
+│  │  ├─ experiment_evaluator.py 저장 세션의 3~15m 평가
+│  │  └─ yolo_overlay_generator.py 저장 세션 비교 영상 생성
 │  └─ web/                       [비어 있음]
 ├─ radar_dsp/
 │  ├─ include/                   [비어 있음]
@@ -75,13 +74,16 @@ carla/
 ├─ samples/
 │  └─ qt_preview.png             README 화면 미리보기
 ├─ scripts/                      [비어 있음] 실행·유지보수 스크립트용 자리
+├─ tests/                        Python 거리 추정·평가·기록 검사
 ├─ transport/                    [비어 있음] 프로세스 간 데이터 전송용 자리
 ├─ .gitignore
 ├─ README.md                     소개와 Windows 실행 안내
-└─ requirements.txt              PySide6 의존성
+├─ requirements.txt              Python 의존성
+├─ run_carla_30fps.bat           CARLA 실행 보조 스크립트
+└─ run_yolo11n.bat               YOLO 연결 Qt 실행 스크립트
 ```
 
-`benchmarks/`, `configs/`, `core/`, `monitor/backend/`, `monitor/web/`, `radar_dsp/`, `scripts/`, `transport/`의 설명은 **예정된 용도**다. 빈 디렉터리는 Git에서 추적되지 않으므로 새 체크아웃에는 보이지 않을 수 있다. C++ 영상처리용 `vision/`, 센서 융합용 `fusion/`, 루트 `CMakeLists.txt`는 이후 단계에서 추가하며 현재 트리에는 없다.
+`benchmarks/`, `configs/`, `core/include/`, `core/src/`, `core/tests/`, `monitor/backend/`, `monitor/web/`, `radar_dsp/`, `scripts/`, `transport/`의 비어 있는 부분은 **예정된 용도**다. 빈 디렉터리는 Git에서 추적되지 않으므로 새 체크아웃에는 보이지 않을 수 있다. 프로젝트 자체의 C++ 영상처리·센서 융합 모듈과 루트 `CMakeLists.txt`는 아직 없다.
 
 ## 3. 현재 구현 구조
 
@@ -91,8 +93,13 @@ CARLA 서버 + 지정 차량
   └─ 차량 월드 스냅샷
             ↓
       CarlaCollector (백그라운드 스레드)
-            ├─ LiveState (최근 값과 수집률) → MonitorWindow (Qt, 50 ms 갱신)
+            ├─ LiveState (프레임별 센서 값·수집률)
+            │    ├─ YOLO 작업자 → 영상 추적 / 레이더 보조 추적
+            │    ├─ 카메라·레이더 위치 및 거리 추정
+            │    └─ MonitorWindow (Qt 비교 화면)
             └─ SessionRecorder (별도 기록 스레드) → JPEG + JSONL
+                         ↓
+              저장 세션 평가 → 3~15m 보고서 / 비교 영상
 ```
 
 | 구성 요소 | 위치 | 책임 |
@@ -100,10 +107,17 @@ CARLA 서버 + 지정 차량
 | `CarlaCollector` | `collector/live.py` | CARLA 접속, 차량 검색, 센서 생성·제거, 콜백 변환, 차량 스냅샷 수집, 재연결 |
 | `LiveState` | `collector/live.py` | 잠금으로 보호되는 최신 센서 값, 최근 이벤트, 최근 2초 수신률 제공 |
 | `SessionRecorder` | `collector/live.py` | 별도 대기열과 스레드에서 측정값 JSONL 및 카메라 JPEG 저장, 누락 수 집계 |
-| `MonitorWindow` | `monitor/qt/app.py` | RGB 영상, 레이더 플롯·표, 차량·IMU·GNSS 값, 이벤트·저장 상태 표시와 기록 토글 |
+| `YOLO11Detector`·작업자 | `core/yolo11_detector.py`, `monitor/qt/yolo_worker.py` | 별도 TensorRTx DLL로 검출하고 카메라 프레임·시각과 함께 결과 전달 |
+| 추적기 | `monitor/qt/tracker.py` | 영상 전용 및 레이더 보조 트랙 연결·ID 관리 |
+| 거리·위치 추정 | `monitor/qt/positioning.py` | 같은 프레임의 레이더 점 투영·군집화, 카메라 기본 거리와 조건부 레이더 거리 선택 |
+| 저장 세션 평가 | `monitor/qt/experiment_evaluator.py` | 세 방법의 3~15m 차체 간격을 CARLA GT와 비교하고 보고서 생성 |
+| 비교 영상 생성 | `monitor/qt/yolo_overlay_generator.py` | 저장 세션에서 원본·검출·추적·융합 2×2 영상 생성 |
+| `MonitorWindow` | `monitor/qt/app.py` | RGB 비교 화면, 레이더 플롯·표, 차량·IMU·GNSS 값, 이벤트·저장·실험 버튼 제공 |
 | `RadarPlot` | `monitor/qt/app.py` | 레이더 거리·방위각·상대속도를 2D로 표시 |
 
-센서 설정은 현재 `CarlaCollector._attach_sensors()`에 고정되어 있다. RGB는 640×480, 시야각 90°, 설정상 `sensor_tick=0.05`초다. 레이더는 최대 거리 100 m, 수평 시야각 35°, 수직 시야각 20°, 초당 포인트 1,500개, `sensor_tick=0.05`초다. IMU와 GNSS도 `sensor_tick=0.05`초다. 실제 수집·표시 FPS는 실행 환경에 따라 달라지며 화면에 측정값으로 표시된다.
+센서 설정은 현재 `CarlaCollector._attach_sensors()`에 고정되어 있다. RGB는 640×480, 시야각 90°, 설정상 `sensor_tick=0.066666`초(30FPS 월드 기준 약 15FPS)다. 레이더는 최대 거리 100 m, 수평 시야각 35°, 수직 시야각 20°, 초당 포인트 1,500개다. 카메라·레이더·IMU·GNSS를 같은 배치에서 생성하고 모두 동일한 `sensor_tick=0.066666`초로 수집한다. 융합에는 카메라와 CARLA 프레임 번호가 같은 레이더 측정만 사용한다. 실제 수집·표시 FPS는 실행 환경에 따라 달라지며 화면에 측정값으로 표시된다.
+
+카메라 기반 거리와 레이더 기반 거리는 각각 관측한 상대 차 지점부터 내 차 bounding box 외곽까지의 평면 간격이다. 유효한 가까운 레이더 점 묶음이 카메라 거리와 1m 이내로 일치할 때 레이더를 선택하고, 그렇지 않으면 카메라 값을 쓴다. 2차원 위치의 가중 융합과 최종 거리 선택은 별도 계산이다. 자세한 조건과 GT 정의는 [거리 추정 기록](DISTANCE_ESTIMATION.md)에 있다.
 
 ## 4. 현재 실행과 기록 형식
 
@@ -115,49 +129,31 @@ Windows에서 CARLA 0.9.16과 대상 차량을 먼저 실행한 뒤, 프로젝�
 
 `--host`, `--port`, `--role`, `--output`은 선택 인자이며 위 값이 기본값이다. CARLA Python 패키지는 별도 wheel로 설치하며 `requirements.txt`에는 PySide6만 선언되어 있다.
 
-앱을 시작하면 세션 폴더가 즉시 생성되고 기록이 켜진다. 화면 버튼으로 기록을 일시 중지하거나 재개할 수 있다. 세션 폴더에는 다음 파일이 들어간다.
+앱 시작만으로 기록하지 않는다. 화면에서 일반 기록, YOLO 검출 기록, YOLO+트래킹 기록, YOLO+레이더 융합 기록 중 하나를 직접 시작한다. 세션 폴더에는 다음 파일이 들어간다.
 
 | 경로 | 내용 |
 | --- | --- |
 | `session.json` | 생성 시각, CARLA 호스트·포트, 차량 역할, 저장 형식 |
 | `measurements.jsonl` | 측정값 한 건당 JSON 한 줄. `kind`로 `camera`, `radar`, `vehicle`, `imu`, `gnss`, `collision`, `lane_invasion` 구분 |
 | `camera/*.jpg` | 센서 ID와 프레임 번호로 이름 붙인 카메라 이미지. JSONL의 `image` 상대 경로로 참조 |
+| `detections.jsonl` | YOLO 및 두 트래킹 세션의 검출 박스와 원본 프레임 정보 |
+| `tracks.jsonl` | 일반 트래킹 세션의 영상 전용 트랙 또는 융합 세션의 레이더 보조 트랙 |
+| `vision_tracks.jsonl` | 레이더 융합 세션에서 함께 저장하는 영상 전용 트랙 기준선 |
+| `positions.jsonl` | 두 트래킹 세션의 카메라 단독·레이더 보조 위치 추정값과 CARLA 기준 위치 |
+| `radar_fusion.jsonl` | 레이더 융합 기록에서 추출한 위치 추정값 전용 파일 |
+| `ground_truth.jsonl` | 위치 오차 평가와 트랙 확인용 CARLA 차량 위치 |
+| `accuracy_summary.json` | 기록 종료 시 생성되는 위치 정확도·센서 프레임 정렬 요약 |
+| `experiment_results/report_3m_15m.md` | 저장 세션의 세 방법별 차체 간격 MAE·RMSE와 표본 수 |
+| `experiment_results/summary_3m_15m.json` | 같은 실험의 기계 판독용 집계 |
+| `experiment_results/position_errors_3m_15m.csv` | 차량·프레임별 GT/추정 거리와 레이더 선택 근거 |
 
 측정 레코드는 공통적으로 `frame`, `simulation_timestamp`, `receive_timestamp`를 가진다. 센서 레코드에는 `sensor_id`가 있고, 카메라 이외의 센서 레코드에는 `sensor_transform`도 있다. 차량 레코드는 `vehicle_id`, 위치·회전·속도 벡터·km/h 속도를 포함한다. 레이더의 각 포인트는 `distance_m`, `azimuth_rad`, `altitude_rad`, `relative_velocity_mps`를 가진다. 두 각도는 저장 시 라디안이며 화면 표에서 도 단위로 변환한다.
 
-기록 대기열이 가득 차면 해당 데이터는 누락되고 화면에 누적 누락 수가 표시된다. 따라서 저장 파일이 모든 시뮬레이션 프레임을 포함한다고 가정하면 안 된다. 여러 센서 레코드의 대응 관계는 JSONL 줄 순서보다 `frame`과 시뮬레이션 시각으로 판단한다.
+기록 대기열이 가득 차면 해당 데이터는 누락되고 화면에 누적 누락 수가 표시된다. 따라서 저장 파일이 모든 시뮬레이션 프레임을 포함한다고 가정하면 안 된다. 여러 센서 레코드의 대응 관계는 JSONL 줄 순서보다 `frame`과 시뮬레이션 시각으로 판단한다. 레이더 융합 기록은 같은 프레임에 대한 영상 전용 트랙과 레이더 보조 트랙을 모두 저장한다. 화면의 **저장 세션 전체 비교 영상 생성** 버튼은 `*_radar_fusion` 세션에서 원본·YOLO·영상 트래킹·레이더 융합 화면을 2×2 MP4로 만들며, `ffmpeg`가 PATH에 있어야 한다. 과거 융합 세션에 `vision_tracks.jsonl`이 없으면 저장한 검출 기록을 재생해 영상 전용 트래킹 기준선을 생성한다. 추가 오버레이는 `annotated/`, `tracked/`, `radar_fusion/` 폴더에 기록한다.
 
-## 5. 목표 아키텍처와 데이터 계약
+**저장 세션 3~15m 실험 결과 생성** 버튼은 융합 세션의 카메라 트래킹·카메라/레이더 거리 선택·레이더 보조 트래킹을 같은 CARLA 프레임의 GT와 비교한다. GT는 두 차량의 회전 bounding box 외곽 사이 최단 평면 간격이며, GT 3m 이상 15m 이하인 표본만 평가한다. `accuracy_summary.json`의 기존 2차원 위치 오차와 이 실험의 **차체 간 거리 오차**는 서로 다른 지표다.
 
-```text
-CARLA 서버 (Windows)
-    ↓
-Python collector ── 원본 카메라·레이더·평가용 GT 기록
-    ↓ 버전 있는 SensorFrame + 바이너리 영상
-transport adapter ── 파일 Replay 또는 Live 입력
-    ↓
-C++17 Core (CARLA·Python·Qt 비종속)
-    ├─ vision: OpenCV 전처리 → YOLO11n ONNX 추론 → 검출 후처리 → 추적
-    ├─ radar_dsp: CARLA 검출점 처리 / 별도 I/Q 입력의 FFT·필터 검증
-    └─ fusion: 시간·좌표 변환 → 연관 → 상태 추정 → 이벤트 검출
-    ↓ 버전 있는 ProcessedResult
-파일 기록 ── Qt 검증 도구 ── FastAPI/WebSocket ── React 대시보드
-```
-
-CMake 타깃은 `core`, `vision`, `radar_dsp`, `fusion` 등 역할별 라이브러리로 나누고 CARLA 수집 어댑터와 UI를 바깥에 둔다. 같은 Core를 Windows/MSVC와 WSL2 Ubuntu/GCC에서 빌드·테스트한다. Live와 Replay는 **동일한 처리 인터페이스**에 `SensorFrame`을 공급한다. 수집, C++ 처리, 파일 기록, UI는 제한된 크기의 대기열과 별도 작업자로 연결하고 누락·지연을 계측한다. Python↔C++ 연결 방식은 파일 기반 Replay로 먼저 검증하고, Live 전송은 버전 있는 메시지와 영상 바이너리 페이로드로 구현해 지연·누락을 측정한다. 이 구조는 설계 목표이며 현재 구현 상태를 뜻하지 않는다.
-
-| 공통 메시지 | 필수 정보 | 계산 가능할 때 추가할 정보 |
-| --- | --- | --- |
-| `SensorFrame` | `schema_version`, `sensor_id`, `frame_id`, `simulation_timestamp`, `receive_timestamp`, `sensor_transform`, `payload_type`, `payload` | 영상 크기·픽셀 형식, 레이더 단위·좌표계, 추적용 단계별 시각 |
-| `ProcessedResult` | `schema_version`, `source_frame_id`, `processing_timestamp`, `processing_latency`, `object_id`, `object_class`, `bounding_box`, `confidence` | 융합된 `position`, `radial_velocity`, `estimated_velocity`, `event_type` |
-
-`position`·`estimated_velocity`처럼 아직 계산하지 않은 값은 비워 두고, 카메라 2D 좌표를 3D 위치로 가장하지 않는다. `simulation_timestamp`는 시뮬레이션 시간이고 수신·처리 지연을 직접 계산할 벽시계가 아니다. End-to-End 지연에는 수집 입구, 전송, 처리 완료, 표시 시점의 측정값과 각 시계의 기준을 별도로 기록한다. Windows↔WSL2 경계를 지나는 측정은 시계 차이를 고려한다.
-
-### 레이더 데이터의 기술적 한계
-
-현재 CARLA 레이더의 `raw_data`는 이름과 달리 **반사파의 원시 I/Q 샘플이 아닌 검출점 배열**이다. 검출점에는 거리, 방위각, 고도각, 상대속도가 있다. 따라서 CARLA 입력만으로 FFT·위상 신호 필터 설계나 실제 레이더 수신 신호 처리 성능을 주장할 수 없다. CARLA 경로에서는 검출점 필터링·군집화·추적·카메라 연계를 검증한다. FFT와 디지털 필터는 `radar_dsp/`의 별도 I/Q 입력 인터페이스와 합성 신호 또는 출처가 명확한 샘플로 구현·테스트하고, 두 결과의 근거를 구분해 보고한다. [CARLA 레이더 센서 문서](https://carla.readthedocs.io/en/latest/ref_sensors/#radar-sensor)
-
-## 6. 단계별 기획
+## 5. 단계별 진행 현황
 
 ### Phase 1 · 실시간 수집과 모니터링 — 구현됨
 
@@ -165,39 +161,41 @@ CMake 타깃은 `core`, `vision`, `radar_dsp`, `fusion` 등 역할별 라이브�
 - Qt 단일 창에서 영상, 레이더, 주행 상태, 이벤트, 수집률, 기록 현황 표시.
 - 세션별 JPEG·JSONL 기록 및 기록 일시 중지·재개.
 
-### Phase 1.5 · 크로스 플랫폼 C++ Core의 뼈대 — 다음 작업
+### Phase 1.5 · TensorRTx YOLO11n 빌드와 저장 영상 검출 — Windows 검증 완료
 
-- 루트 `CMakeLists.txt`와 `CMakePresets.json`을 만들고 C++17 `core` 라이브러리, 샘플 `replay` 실행 파일, CTest를 구성한다. `core`의 공개 헤더는 CARLA·Python·Qt 타입을 포함하지 않는다.
-- `SensorFrame`·`ProcessedResult`의 필드·단위·좌표계와 원본/처리 결과의 구분을 정의한다. 기존 JSONL/JPEG 세션을 읽는 최소 파일 어댑터로 CARLA 없이 같은 입력을 공급한다.
-- Windows/MSVC와 WSL2 Ubuntu 24.04/GCC에서 동일한 소스를 빌드하고, 고정 샘플의 파싱·시각/좌표 변환·데이터 무결성 테스트를 통과시킨다. 빌드·테스트 명령과 결과를 문서화한다.
-- 완료 기준은 양 플랫폼에서 `cmake` 빌드와 `ctest`가 통과하고, 같은 저장 세션을 Core 입력으로 읽는 것이다. [CMake의 CTest 안내](https://cmake.org/cmake/help/latest/guide/tutorial/Testing%20and%20CTest.html)를 따른다.
+- TensorRTx의 `yolo11/` CMake로 `yolo11_det`와 `yolo11_detector.dll`을 Windows에서 별도 빌드했다. CUDA 13.4, TensorRT 10.16.1, OpenCV 4.14를 사용했다. 기존 Python 수집기·PySide6 화면은 CMake에 넣지 않는다.
+- YOLO11n `.pt`를 `.wts`로 변환하고 TensorRT 엔진을 만들었다. 저장된 CARLA JPEG에서 차량 1대의 클래스·박스·점수가 공식 Ultralytics 결과와 일치하는지 확인했다. `.cu`는 검출 헤드 플러그인과 전후처리를 담당하고 신경망 본체는 TensorRT가 실행한다.
+- **남은 검증:** Ubuntu 빌드와 더 많은 장면의 정확도 비교.
 
-이 뼈대를 먼저 만들면 이후 YOLO·레이더·융합 코드가 Python Qt 앱의 내부 구현에 묶이지 않는다.
+현재 로컬 경로와 검증 결과는 [Phase 1.5 TensorRTx 기록](PHASE_1_5_CMAKE.md)을 따른다. CARLA Live 추론·결과 기록·Qt 표시를 연결했고, 기본 클래스 인식 IoU/중심 이동 트래커를 추가했다. 트래커 안정성과 ID 전환율은 다양한 CARLA 장면에서 아직 평가해야 한다.
 
-### Phase 2 · C++ 영상처리·YOLO11n 탐지·트래킹 — 계획
+### Phase 2 · YOLO11n CUDA 영상처리·탐지·트래킹 — Python/Qt 경로 구현
 
-- `C:\ai\carla-yolo11n\yolo11n.pt`를 기존 Python 3.13 YOLO 환경에서 ONNX로 한 번 내보낸다. C++ 런타임은 ONNX 파일을 읽으며 학습 폴더나 Python 패키지에 실행 시 의존하지 않는다. 모델 해시, 클래스 목록, 입력·출력 형식을 기록한다.
-- `vision/`의 C++17/OpenCV 코드에서 영상 전처리, ONNX Runtime 추론, 검출 후처리, 다중 객체 트래킹, 주석 그리기, JPEG 인코딩을 구현한다. 트래커는 모델 변환과 별도 코드다. [Ultralytics 내보내기](https://docs.ultralytics.com/modes/export), [ONNX Runtime C++](https://onnxruntime.ai/docs/get-started/with-cpp)
-- 먼저 Phase 1.5의 Replay 입력으로 `.pt` 기준 탐지와 C++ 결과를 비교한다. 그다음 Python 수집기의 카메라 프레임을 C++ 작업자에 연결한다. 원본 기록과 처리 결과를 분리하고, Qt는 C++에서 반환한 영상과 검출 결과를 표시한다.
-- 완료 기준은 양 플랫폼의 CPU 실행에서 동일한 샘플의 검출·추적 테스트가 통과하고, 실제 CARLA 영상에서 ID가 표시되며, 추론 지연이 센서 콜백과 파일 기록을 막지 않는 것이다. GPU 가속은 지원 환경을 명시하고 별도로 측정한다.
+- Phase 1.5에서 검증한 TensorRTx YOLO11n 소스·가중치 변환 결과의 버전을 고정한다. 소스 커밋, 원본·결과 해시, 클래스 목록, 입력 크기·색상·정밀도와 출력 형식을 기록한다.
+- 엔진을 한 번 로드하는 C++ DLL과 Python 작업자 스레드를 연결했다. 작업자는 기존 수집기의 최신 카메라 BGRA 프레임을 `ctypes`로 전달한다. 수집 콜백과 Qt GUI 스레드는 추론을 기다리지 않는다. 별도 프로세스/IPC는 현재 필요하지 않아 사용하지 않는다.
+- 결과의 원본 `sensor_id`·`frame`·시각을 보존한다. Qt 좌우 패널은 각각 `원본`, `YOLO 검출`, `트래킹`, `레이더 융합 트래킹` 화면을 선택한다. 탐지와 트래킹은 별도 버튼으로 제어하며 트래킹은 탐지가 켜져 있을 때만 동작한다. 클래스·박스 IoU·중심 이동에 기반한 추적기가 ID를 유지하고 최대 10개 처리 프레임 동안 예측 박스를 남긴다. 레이더 포인트를 카메라 이미지로 투영해 검출 박스와 연결하고, 연결된 거리·상대속도를 트랙 연관 점수와 위치 추정에 사용한다. 가림·교차 상황의 ID 전환 평가와 외형 재식별은 남았다.
+- 일반 기록은 원본 영상·센서 데이터를, YOLO 기록은 검출 데이터를 저장한다. YOLO+트래킹 기록은 레이더를 트랙 연결에 사용하지 않는 기준선이다. YOLO+레이더 융합 기록은 레이더 거리·속도를 트랙 연결과 위치 추정에 반영하면서 영상 전용 트랙도 함께 저장한다. 두 트래킹 모드는 `detections.jsonl`, `tracks.jsonl`, 평가용 CARLA 차량 위치 `ground_truth.jsonl`, 위치 추정 `positions.jsonl`을 저장한다. 전용 융합 기록에는 영상 전용 결과 `vision_tracks.jsonl`과 레이더 보조 결과 `tracks.jsonl`이 함께 들어가며, 융합 추정 레코드는 `radar_fusion.jsonl`에도 기록한다. 두 트래킹 기록은 종료 시 2차원 위치 정확도의 `accuracy_summary.json`을 만든다. 좌표 변환에는 카메라 FOV·월드 변환과 레이더 월드 변환을 사용한다. 2차원 위치에는 평평한 지면 가정과 고정 가중치(전방: 카메라 0.2/레이더 0.8, 좌우: 카메라 0.65/레이더 0.35)가 적용된다. 차체 간 최종 거리는 Phase 4에서 별도로 선택한다. CARLA 대상 차량 위치는 오차 평가·트랙 ID 연결에만 쓴다. 네 기록 모드는 동시에 사용할 수 없다.
+- 초기 위치 기준선과 별도로 차량 간 거리 GT와 세 방법 비교를 구현했다. 같은 기록 세션에서 규칙을 탐색하고 평가한 결과는 [거리 추정 기록](DISTANCE_ESTIMATION.md)에 남겼다. 도로 경사·가림·다른 차량 모델과 경로에서 독립 검증해야 한다.
+- 완료 기준은 ID 전환율과 누락 구간을 CARLA 장면에서 평가하고, 추론·추적이 센서 콜백과 파일 기록을 막지 않는지 확인하는 것이다. 전처리·GPU 업로드·모델·후처리·추적 지연과 대기열 누락을 구분해 측정한다. 후보 저장소가 제시한 성능 수치는 이 환경의 측정값으로 사용하지 않는다.
 
-### Phase 3 · C++ 레이더 처리와 DSP 검증 — 계획
+### Phase 3 · 레이더 검출점 처리 — Python 경로 구현, C++/DSP 계획
 
-- CARLA 레이더 검출점에 대한 이상치 제거, 시간적 연관, 군집화, 거리·상대속도 추정과 테스트를 `radar_dsp/`에 구현한다.
+- Python `monitor/qt/positioning.py`에서 같은 프레임 레이더 점의 영상 투영, 거리·공간 후보 검사, 가까운 점 군집, 시간적 이동 검사와 카메라 관측과의 연관을 구현했다. 이를 독립 C++ `radar_dsp/` 모듈로 이관하고 단위 테스트를 확장하는 일은 남아 있다.
 - **별도 I/Q 입력 경로**에서 FFT와 디지털 필터를 구현하고, 합성 신호의 알려진 주파수·잡음 조건으로 스펙트럼과 필터 결과를 검증한다. CARLA 검출점 테스트와 I/Q DSP 테스트의 입력 출처·성능 수치를 분리한다.
-- [WO2023048459A1](#8-특허-참고-자료)의 구간별 신뢰도 판단과 [US11771954B2](#8-특허-참고-자료)의 다중 이동 신호 구분은 아이디어 검토 자료로 둔다. 원시 위상 신호가 없는 CARLA 경로에 특허의 절차를 그대로 적용했다고 주장하지 않는다.
+- CARLA 레이더는 검출점 배열을 제공하며 원시 I/Q 신호를 제공하지 않는다. 따라서 현재 검출점 처리 결과를 FFT·위상 신호 처리 성능으로 해석하지 않는다.
 - 완료 기준은 두 입력 경로의 C++ 단위 테스트와 재현 가능한 결과 그래프·오차 수치다.
 
-### Phase 4 · C++ 센서 융합·이벤트 검출 — 계획
+### Phase 4 · 카메라·레이더 융합과 거리 평가 — Python/Qt 프로토타입 구현
 
-- 카메라 추적 객체와 레이더 객체의 프레임·시각을 맞추고 센서 외부 파라미터와 좌표 변환을 적용해 연관한다. 누락·불일치 측정값의 처리 규칙과 신뢰도를 남긴다.
-- 융합 객체의 위치·속도 추정과 근접/접근 이벤트를 구현한다. [WO2024232644A1](#8-특허-참고-자료)의 영상 위치와 레이더 궤적 표시 개념은 비교 대상으로 사용한다.
-- CARLA 액터 위치·속도는 **평가용 정답 데이터**로 별도 수집하고 Core 입력에서 제외한다. 거리·속도 오차와 추적 ID 전환을 재현 가능한 시나리오에서 측정한다.
-- 완료 기준은 원본 카메라/레이더, 각 처리 결과, 융합 결과를 구별해 Replay·Live에서 확인하고 오차를 보고하는 것이다.
+- Python/Qt에서는 카메라와 레이더를 CARLA 프레임 번호로 맞추고 센서 변환을 적용해 레이더 점을 YOLO 차량 상자에 연결한다. 영상 전용과 레이더 보조 트랙, 2차원 위치, 차체 간 거리를 기록하고 Live 화면에서 비교한다.
+- **거리 기준:** GT는 같은 프레임의 내 차·상대 차 회전 bounding box 사이 최단 평면 간격이다. 카메라 관측 지점부터 내 차 외곽까지의 간격을 기본으로 하고, 가까운 레이더 점 3개 이상이 모이며 편차가 0.5m 이하이고 카메라 거리와 1m 이내로 일치하며 시간적 이동 검사를 통과할 때 레이더 거리를 선택한다. 레이더를 쓸 수 없거나 불일치하면 카메라 값을 사용한다. 2차원 위치 가중 융합과 거리 선택은 별개다.
+- **평가 경로:** 저장 세션을 한 번에 재생해 영상 트래킹+카메라, 영상 트래킹+거리 융합, 레이더 보조 트래킹+거리 융합을 GT 3~15m 구간에서 비교한다. Markdown 보고서·JSON 집계·차량별 CSV와 2×2 비교 영상을 생성한다. CARLA 대상 차량 위치·크기·자세는 GT와 트랙 확인에만 쓰며 센서 기반 거리 추정에는 넣지 않는다.
+- **현재 결과:** 2026-10-21 Town02 융합 세션의 공통 표본 254건에서 카메라 거리 MAE/RMSE는 0.952/1.210m, 조건부 레이더 선택은 0.917/1.199m였다. 레이더 최종 선택은 47건이었다. 두 융합 트래킹 방식의 거리 수치는 이 세션에서 같았다. 규칙 탐색에 쓴 세션을 다시 평가한 값이므로 독립 검증이나 추적 개선의 증거로 해석하지 않는다. 상세 표와 한계는 [차량 간 거리 추정과 평가 기록](DISTANCE_ESTIMATION.md)에 있다.
+- **남은 원 기획:** 센서 융합을 독립 C++ Core로 이관하고, 근접·접근 이벤트 검출과 속도 오차·ID 전환·지연 평가를 추가한다. CARLA 충돌·차선 이탈 센서 이벤트 표시는 현재 구현돼 있지만 융합 결과에서 새 위험 이벤트를 판단하지는 않는다. 별도 주행 세션의 독립 검증도 필요하다.
 
 ### Phase 5 · Live 전송과 다중 화면 — 계획
 
-- `transport/`에 메시지 버전, 길이, 순서, 오류·재연결 규칙을 명시하고 Python 수집기↔C++ 처리기 간 Live 경로를 다듬는다. 영상 바이너리와 작은 메타데이터를 구분하고 전송 지연·누락률을 측정한다.
+- 현재 Python 수집기와 같은 프로세스의 YOLO DLL 연결을 별도 C++ Core·Live 전송 경로로 확장한다. `transport/`에 메시지 버전, 길이, 순서, 오류·재연결 규칙을 정의하고 영상 바이너리와 작은 메타데이터를 구분해 전송 지연·누락률을 측정한다.
 - 기존 PySide6 Qt 화면을 검증 도구로 활용하고 `monitor/backend/`의 FastAPI/WebSocket, `monitor/web/`의 React 대시보드를 추가한다. 두 화면이 같은 처리 결과를 소비한다.
 - 결과를 원본과 별도 파일에 저장하고 세션 재생을 완성한다. SQLite는 파일 기반 기록의 검색·조회 한계가 확인되면 도입한다.
 - 완료 기준은 동일 세션의 Live·Replay 결과를 Qt와 웹에서 확인하고, 표시 지연·데이터 누락을 수치로 보고하는 것이다.
@@ -208,30 +206,3 @@ CMake 타깃은 `core`, `vision`, `radar_dsp`, `fusion` 등 역할별 라이브�
 - Town02의 차량 5~10대, RGB 640×480, 레이더 1대라는 고정 조건에서 반복 측정한다. 목표 수치는 기준 실행 결과를 얻은 뒤 정한다.
 - MSVC와 GCC의 CMake 빌드·CTest 결과, Windows 11·WSL2 Ubuntu 24.04 설치 절차, 샘플 세션·Replay 명령, 데모 영상, 외부 라이브러리 목록을 공개 포트폴리오에 정리한다.
 - 완료 기준은 제3자가 샘플 데이터로 핵심 C++ 처리 결과와 벤치마크 절차를 재현할 수 있는 것이다.
-
-## 7. 채용 공고 대응과 남은 설계 결정
-
-| 공고의 역량 | 이 프로젝트에서 보여줄 근거 |
-| --- | --- |
-| C++ 응용 개발·Windows/Linux·CMake | CARLA 비종속 Core, MSVC/GCC 빌드, CTest, 설치·Replay 문서 |
-| FFT·필터 등 DSP | 별도 I/Q 입력에서 주파수·잡음 조건을 통제한 C++ 알고리즘과 정량 테스트 |
-| 레이더 센서 처리 | CARLA 검출점의 필터링·연관·융합과 입력 한계를 명시한 평가 |
-| OpenCV 객체 검출·트래킹 | C++ YOLO11n 추론 전후처리, 객체 ID 추적, 오탐·ID 전환 측정 |
-| 카메라 계측·센서 융합 | 좌표·시각 보정, 거리·속도 추정, 평가용 CARLA 정답과의 오차 |
-| 멀티스레드·통신·Qt | bounded queue, 버전 있는 메시지, 지연·누락 측정, Qt 검증 화면 |
-
-이 포트폴리오는 구현·설계 역량을 보여주지만 공고의 **경력 5년이라는 기간 요건 자체를 대체하지는 않는다**. 임베디드 MCU/FPGA 연동과 실제 레이더 RF 신호 처리는 별도 장비·데이터 없이 수행한 것으로 적지 않는다.
-
-착수 전 결정할 항목은 Live 전송 형식과 Python↔C++ 경계, 샘플 I/Q 데이터의 출처, YOLO11n 클래스·트래커와 ONNX Runtime 실행 장치, 센서 캘리브레이션 방식, 성능 목표의 기준 장면이다. 성능·정확도 수치는 구현 후 측정한다. 선택 기능인 LLM은 이 기준 기능과 검증이 완료된 뒤 검토한다.
-
-## 8. 특허 참고 자료
-
-아래 세 문헌은 사용자가 지정한 설계 참고 자료다. 모두 **골프공 또는 골프클럽**을 대상으로 하므로, 현재 **CARLA 차량·보행자** 모니터에 그대로 적용되는 구현 사양으로 취급하지 않는다. 특히 이 문헌들이 YOLO 모델이나 현재 프로젝트의 트래커를 지정하는 것은 아니다.
-
-| 문헌 | 문헌의 핵심 내용 | 이 프로젝트에서 검토할 지점 |
-| --- | --- | --- |
-| [WO2023048459A1 — 타격된 볼의 레이더 데이터로 궤적 산출](https://patents.google.com/patent/WO2023048459A1/ko) | 초기 운동 구간의 레이더 데이터 유효성을 판단하고, 결과에 따라 초기 구간 또는 이후 구간의 데이터로 볼 궤적을 산출한다. | **Phase 3:** 입력 신뢰도에 따라 사용할 측정 구간을 평가하는 개념 참고. |
-| [US11771954B2 — 레이더 데이터로 골프클럽 스윙 궤적 산출](https://patents.google.com/patent/US11771954B2/en) | 볼과 클럽 헤드의 레이더 신호를 구분하고 타격 시점을 기준으로 클럽 헤드의 궤적을 산출한다. | **Phase 3:** 여러 이동 신호와 이벤트 시각의 관계를 검토할 때 참고. |
-| [WO2024232644A1 — 골프 샷 영상에 레이더 기반 볼 궤적 표시](https://patents.google.com/patent/WO2024232644A1/en) | 카메라 영상에서 볼의 초기 위치를 찾고, 레이더로 얻은 이동 궤적을 영상 위에 표시한다. | **Phase 3→4:** 영상 추적 객체와 레이더 결과의 시간·좌표 연계 및 화면 표시 개념 참고. |
-
-현재 `collector/live.py`가 저장하는 CARLA 레이더 값은 포인트별 거리·방위각·고도각·상대속도다. WO2023048459A1에서 다루는 **원시 레이더 위상 신호**나 US11771954B2의 **볼·클럽 헤드 반사 신호**는 현재 입력에 없다. 따라서 두 문헌의 신호 처리 절차를 현 데이터에 직접 적용할 수 있다고 가정하지 않는다. Phase 3·4에 착수할 때는 입력과 보정 방법, 적용하려는 청구항과 권리 상태를 별도로 확인한다.

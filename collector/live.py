@@ -11,7 +11,7 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import carla
 from PySide6.QtGui import QImage
@@ -25,6 +25,19 @@ class CameraFrame:
     width: int
     height: int
     bgra: bytes
+    sensor_id: int = 0
+    fov: float = 90.0
+    sensor_transform: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DetectionFrame:
+    camera: CameraFrame
+    boxes: tuple[Any, ...]
+    processing_ms: float
+    tracks: tuple[Any, ...] = ()
+    positioning: dict[str, Any] | None = None
+    vision_tracks: tuple[Any, ...] = ()
 
 
 def vector(value: Any) -> dict[str, float]:
@@ -45,16 +58,22 @@ def transform(value: Any) -> dict[str, Any]:
 class LiveState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._sensor_ready = threading.Condition(self._lock)
         self.status = "CARLA 연결 중"
         self.camera: CameraFrame | None = None
+        self.detections: DetectionFrame | None = None
         self.radar: dict[str, Any] | None = None
         self.vehicle: dict[str, Any] | None = None
         self.imu: dict[str, Any] | None = None
         self.gnss: dict[str, Any] | None = None
+        self.positioning: dict[str, Any] | None = None
+        self._radar_by_frame: dict[int, dict[str, Any]] = {}
+        self._ground_truth_by_frame: dict[int, dict[str, Any]] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=12)
         self.arrivals: dict[str, deque[float]] = {
             name: deque(maxlen=120)
-            for name in ("camera", "radar", "vehicle", "imu", "gnss")
+            for name in ("camera", "detections", "radar", "vehicle", "imu", "gnss",
+                         "positioning", "ground_truth")
         }
 
     def set_status(self, text: str) -> None:
@@ -65,13 +84,18 @@ class LiveState:
         with self._lock:
             self.status = status
             self.camera = None
+            self.detections = None
             self.radar = None
             self.vehicle = None
             self.imu = None
             self.gnss = None
+            self.positioning = None
+            self._radar_by_frame.clear()
+            self._ground_truth_by_frame.clear()
             self.events.clear()
             for arrivals in self.arrivals.values():
                 arrivals.clear()
+            self._sensor_ready.notify_all()
 
     def update(self, name: str, value: Any) -> None:
         with self._lock:
@@ -80,6 +104,54 @@ class LiveState:
             else:
                 setattr(self, name, value)
                 self.arrivals[name].append(time.monotonic())
+                if name == "radar":
+                    self._radar_by_frame[int(value["frame"])] = value
+                    self._trim_history(self._radar_by_frame)
+                    self._sensor_ready.notify_all()
+                elif name == "ground_truth":
+                    self._ground_truth_by_frame[int(value["frame"])] = value
+                    self._trim_history(self._ground_truth_by_frame)
+                    self._sensor_ready.notify_all()
+
+    @staticmethod
+    def _trim_history(history: dict[int, dict[str, Any]], limit: int = 256) -> None:
+        if len(history) > limit:
+            for frame in sorted(history)[:-limit]:
+                history.pop(frame, None)
+
+    def position_context(
+        self, camera_frame: int
+    ) -> tuple[dict[str, Any] | None, int | None,
+               dict[str, Any] | None, int | None]:
+        with self._lock:
+            radar = self._radar_by_frame.get(camera_frame)
+            truth = self._ground_truth_by_frame.get(camera_frame)
+            return radar, 0 if radar is not None else None, truth, 0 if truth is not None else None
+
+    def wait_for_position_context(
+        self, camera_frame: int, timeout_s: float = 0.05
+    ) -> tuple[dict[str, Any] | None, int | None,
+               dict[str, Any] | None, int | None]:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        with self._sensor_ready:
+            while (camera_frame not in self._radar_by_frame
+                   or camera_frame not in self._ground_truth_by_frame):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._sensor_ready.wait(remaining)
+            radar = self._radar_by_frame.get(camera_frame)
+            truth = self._ground_truth_by_frame.get(camera_frame)
+            return radar, 0 if radar is not None else None, truth, 0 if truth is not None else None
+
+    def get_camera(self) -> CameraFrame | None:
+        with self._lock:
+            return self.camera
+
+    def clear_detections(self) -> None:
+        with self._lock:
+            self.detections = None
+            self.positioning = None
 
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -95,10 +167,14 @@ class LiveState:
             return {
                 "status": self.status,
                 "camera": self.camera,
+                "detections": self.detections,
                 "radar": self.radar,
                 "vehicle": self.vehicle,
                 "imu": self.imu,
                 "gnss": self.gnss,
+                "positioning": self.positioning,
+                "ground_truth": self._ground_truth_by_frame[max(self._ground_truth_by_frame)]
+                if self._ground_truth_by_frame else None,
                 "events": list(self.events),
                 "rates": rates,
             }
@@ -108,49 +184,111 @@ class SessionRecorder:
     """Write JSONL measurements and JPEG frames without blocking sensor callbacks."""
 
     def __init__(self, root: Path, host: str, port: int, role: str) -> None:
-        self.path = root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.path.mkdir(parents=True, exist_ok=False)
-        (self.path / "camera").mkdir()
-        (self.path / "session.json").write_text(
-            json.dumps(
-                {
-                    "created_at": datetime.now().astimezone().isoformat(),
-                    "carla_host": host,
-                    "carla_port": port,
-                    "vehicle_role": role,
-                    "camera_format": "JPEG",
-                    "measurements_format": "JSONL",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        self._records: Queue[dict[str, Any]] = Queue(maxsize=4096)
-        self._images: Queue[tuple[CameraFrame, int]] = Queue(maxsize=32)
-        self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._enabled = True
+        self.root = root
+        self.host = host
+        self.port = port
+        self.role = role
+        self.path: Path | None = None
+        self._mode: str | None = None
+        self._last_mode: str | None = None
+        self._records: Queue[dict[str, Any]] | None = None
+        self._images: Queue[tuple[CameraFrame, int]] | None = None
+        self._stop: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+        self._enabled = False
         self._saved_frames = 0
         self._dropped_frames = 0
         self._dropped_records = 0
         self._error = ""
-        self._thread = threading.Thread(target=self._run, name="session-recorder")
-        self._thread.start()
 
     def is_enabled(self) -> bool:
         with self._lock:
             return self._enabled
 
-    def toggle(self) -> bool:
+    @property
+    def mode(self) -> str | None:
         with self._lock:
-            self._enabled = not self._enabled
-            return self._enabled
+            return self._mode
+
+    def start_session(self, mode: str, yolo_engine: Path | None = None) -> Path:
+        if mode not in ("standard", "yolo", "tracking", "radar_fusion"):
+            raise ValueError(f"Unknown recording mode: {mode}")
+        with self._lock:
+            if self._enabled:
+                raise RuntimeError("A recording session is already active")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            path = self.root / f"{timestamp}_{mode}"
+            path.mkdir(parents=True, exist_ok=False)
+            (path / "camera").mkdir()
+            if mode in ("yolo", "tracking", "radar_fusion"):
+                (path / "detections.jsonl").touch()
+            if mode in ("tracking", "radar_fusion"):
+                (path / "tracks.jsonl").touch()
+                (path / "positions.jsonl").touch()
+                (path / "ground_truth.jsonl").touch()
+            if mode == "radar_fusion":
+                (path / "vision_tracks.jsonl").touch()
+                (path / "radar_fusion.jsonl").touch()
+            metadata = {
+                "created_at": datetime.now().astimezone().isoformat(),
+                "carla_host": self.host,
+                "carla_port": self.port,
+                "vehicle_role": self.role,
+                "recording_mode": mode,
+                "camera_format": "JPEG",
+                "measurements_format": "JSONL",
+            }
+            if mode in ("yolo", "tracking", "radar_fusion"):
+                metadata["yolo_engine"] = str(yolo_engine) if yolo_engine else None
+            if mode in ("tracking", "radar_fusion"):
+                metadata["position_estimation"] = {
+                    "camera_model": "pinhole projection to local flat ground plane",
+                    "radar_association": "project radar returns into camera image and match to detection boxes",
+                    "coordinate_frame": "ego vehicle; X forward, Y right, Z up; positions in meters",
+                    "camera_sensor_tick_seconds": 0.066666,
+                    "radar_sensor_tick_seconds": 0.066666,
+                    "max_sensor_frame_delta": 0,
+                    "max_radar_range_age_seconds": 0.0,
+                    "fusion_weights": {
+                        "longitudinal_camera": 0.20,
+                        "longitudinal_radar": 0.80,
+                        "lateral_camera": 0.65,
+                        "lateral_radar": 0.35,
+                    },
+                    "position_reference": "CARLA target bounding-box ground center",
+                    "evaluation_truth": "target vehicle poses used only for scoring; ego pose and ground height provide coordinate reference",
+                }
+            (path / "session.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            records: Queue[dict[str, Any]] = Queue(maxsize=4096)
+            images: Queue[tuple[CameraFrame, int]] = Queue(maxsize=32)
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._run, args=(path, records, images, stop), name="session-recorder"
+            )
+            self.path = path
+            self._mode = mode
+            self._last_mode = mode
+            self._records = records
+            self._images = images
+            self._stop = stop
+            self._thread = thread
+            self._saved_frames = 0
+            self._dropped_frames = 0
+            self._dropped_records = 0
+            self._error = ""
+            self._enabled = True
+            thread.start()
+            return path
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "enabled": self._enabled,
+                "mode": self._mode or self._last_mode,
+                "path": self.path,
                 "saved_frames": self._saved_frames,
                 "dropped_frames": self._dropped_frames,
                 "dropped_records": self._dropped_records,
@@ -158,37 +296,157 @@ class SessionRecorder:
             }
 
     def record(self, data: dict[str, Any]) -> None:
-        if not self.is_enabled():
-            return
-        try:
-            self._records.put_nowait(data)
-        except Full:
-            with self._lock:
-                self._dropped_records += 1
+        self.record_many((data,))
+
+    def record_many(self, records: tuple[dict[str, Any], ...]) -> None:
+        with self._lock:
+            if not self._enabled or self._records is None:
+                return
+            for data in records:
+                if data.get("kind") == "detection" and self._mode not in ("yolo", "tracking", "radar_fusion"):
+                    continue
+                if data.get("kind") == "tracking" and self._mode not in ("tracking", "radar_fusion"):
+                    continue
+                if data.get("kind") == "vision_tracking" and self._mode != "radar_fusion":
+                    continue
+                if data.get("kind") in ("positioning", "ground_truth") and self._mode not in ("tracking", "radar_fusion"):
+                    continue
+                if data.get("kind") == "radar_fusion" and self._mode != "radar_fusion":
+                    continue
+                try:
+                    self._records.put_nowait(data)
+                except Full:
+                    self._dropped_records += 1
 
     def record_camera(self, frame: CameraFrame, sensor_id: int) -> None:
-        if not self.is_enabled():
-            return
-        try:
-            self._images.put_nowait((frame, sensor_id))
-        except Full:
-            with self._lock:
+        with self._lock:
+            if not self._enabled or self._images is None:
+                return
+            try:
+                self._images.put_nowait((frame, sensor_id))
+            except Full:
                 self._dropped_frames += 1
 
-    def _run(self) -> None:
+    def record_detection(self, detection: DetectionFrame) -> None:
+        frame = detection.camera
+        records = [{
+            "schema_version": 1,
+            "kind": "detection",
+            "sensor_id": frame.sensor_id,
+            "frame": frame.frame,
+            "simulation_timestamp": frame.timestamp,
+            "receive_timestamp": frame.received_at,
+            "detection_timestamp": time.time(),
+            "processing_ms": detection.processing_ms,
+            "image": f"camera/{frame.sensor_id}_{frame.frame:08d}.jpg",
+            "boxes": [
+                {
+                    "x": box.x,
+                    "y": box.y,
+                    "width": box.width,
+                    "height": box.height,
+                    "class_id": box.class_id,
+                    "confidence": box.confidence,
+                }
+                for box in detection.boxes
+            ],
+        }]
+        if detection.positioning is not None:
+            records.append(detection.positioning)
+            records.append({**detection.positioning, "kind": "radar_fusion"})
+        records.append({
+            "schema_version": 1,
+            "kind": "tracking",
+            "sensor_id": frame.sensor_id,
+            "frame": frame.frame,
+            "simulation_timestamp": frame.timestamp,
+            "receive_timestamp": frame.received_at,
+            "image": f"camera/{frame.sensor_id}_{frame.frame:08d}.jpg",
+            "tracks": [
+                {
+                    "track_id": track.track_id,
+                    "x": track.x,
+                    "y": track.y,
+                    "width": track.width,
+                    "height": track.height,
+                    "class_id": track.class_id,
+                    "confidence": track.confidence,
+                    "predicted": track.predicted,
+                    "missed_frames": track.missed_frames,
+                    "hits": track.hits,
+                    "velocity_x_px_s": track.velocity_x_px_s,
+                    "velocity_y_px_s": track.velocity_y_px_s,
+                    "radar_range_m": track.radar_range_m,
+                    "radar_range_rate_mps": track.radar_range_rate_mps,
+                    "radar_age_s": track.radar_age_s,
+                }
+                for track in detection.tracks
+            ],
+        })
+        if detection.vision_tracks or self.mode == "radar_fusion":
+            records.append({
+                "schema_version": 1,
+                "kind": "vision_tracking",
+                "sensor_id": frame.sensor_id,
+                "frame": frame.frame,
+                "simulation_timestamp": frame.timestamp,
+                "receive_timestamp": frame.received_at,
+                "image": f"camera/{frame.sensor_id}_{frame.frame:08d}.jpg",
+                "tracks": [
+                    {
+                        "track_id": track.track_id,
+                        "x": track.x,
+                        "y": track.y,
+                        "width": track.width,
+                        "height": track.height,
+                        "class_id": track.class_id,
+                        "confidence": track.confidence,
+                        "predicted": track.predicted,
+                        "missed_frames": track.missed_frames,
+                        "hits": track.hits,
+                        "velocity_x_px_s": track.velocity_x_px_s,
+                        "velocity_y_px_s": track.velocity_y_px_s,
+                    }
+                    for track in detection.vision_tracks
+                ],
+            })
+        self.record_many(tuple(records))
+
+    def _run(
+        self,
+        session_path: Path,
+        records: Queue[dict[str, Any]],
+        images: Queue[tuple[CameraFrame, int]],
+        stop: threading.Event,
+    ) -> None:
+        outputs: dict[str, Any] = {}
         try:
-            with (self.path / "measurements.jsonl").open("a", encoding="utf-8") as output:
-                while not self._stop.is_set() or not self._records.empty() or not self._images.empty():
+            with (session_path / "measurements.jsonl").open("a", encoding="utf-8") as output:
+                while not stop.is_set() or not records.empty() or not images.empty():
                     wrote = False
                     for _ in range(20):
                         try:
-                            record = self._records.get_nowait()
+                            record = records.get_nowait()
                         except Empty:
                             break
-                        output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        destination = output
+                        filenames = {
+                            "detection": "detections.jsonl",
+                            "tracking": "tracks.jsonl",
+                            "vision_tracking": "vision_tracks.jsonl",
+                            "positioning": "positions.jsonl",
+                            "radar_fusion": "radar_fusion.jsonl",
+                            "ground_truth": "ground_truth.jsonl",
+                        }
+                        filename = filenames.get(record.get("kind"))
+                        if filename is not None:
+                            if filename not in outputs:
+                                outputs[filename] = (session_path / filename).open("a", encoding="utf-8")
+                            destination = outputs[filename]
+                        destination.write(json.dumps(record, ensure_ascii=False) + "\n")
                         wrote = True
                     try:
-                        frame, sensor_id = self._images.get_nowait()
+                        frame, sensor_id = images.get_nowait()
                     except Empty:
                         pass
                     else:
@@ -200,7 +458,7 @@ class SessionRecorder:
                             frame.width * 4,
                             QImage.Format.Format_ARGB32,
                         )
-                        if image.save(str(self.path / relative_path), "JPEG", 82):
+                        if image.save(str(session_path / relative_path), "JPEG", 82):
                             output.write(
                                 json.dumps(
                                     {
@@ -211,6 +469,8 @@ class SessionRecorder:
                                         "receive_timestamp": frame.received_at,
                                         "width": frame.width,
                                         "height": frame.height,
+                                        "fov": frame.fov,
+                                        "sensor_transform": frame.sensor_transform,
                                         "image": relative_path,
                                     }
                                 )
@@ -225,15 +485,48 @@ class SessionRecorder:
                         wrote = True
                     if wrote:
                         output.flush()
+                        for handle in outputs.values():
+                            handle.flush()
                     else:
-                        self._stop.wait(0.02)
+                        stop.wait(0.02)
         except Exception as exc:
             with self._lock:
                 self._error = f"기록 오류: {exc}"
+        finally:
+            for handle in outputs.values():
+                handle.close()
+
+    def stop_session(self) -> Path | None:
+        with self._lock:
+            if not self._enabled:
+                return self.path
+            self._enabled = False
+            stop = self._stop
+            thread = self._thread
+            path = self.path
+            mode = self._mode
+            if stop is not None:
+                stop.set()
+        if thread is not None:
+            thread.join()
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
+                self._stop = None
+                self._records = None
+                self._images = None
+                self._mode = None
+        if mode in ("tracking", "radar_fusion") and path is not None:
+            try:
+                from monitor.qt.positioning import write_accuracy_summary
+                write_accuracy_summary(path)
+            except Exception as exc:
+                with self._lock:
+                    self._error = f"정확도 요약 생성 실패: {exc}"
+        return path
 
     def stop(self) -> None:
-        self._stop.set()
-        self._thread.join()
+        self.stop_session()
 
 
 class CarlaCollector:
@@ -253,6 +546,11 @@ class CarlaCollector:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="carla-collector")
         self._sensors: list[carla.Sensor] = []
+        self._world_callback_id: int | None = None
+        self.on_camera_frame: Callable[[], None] | None = None
+        self._actors_lock = threading.Lock()
+        self._vehicle_metadata: dict[int, dict[str, Any]] = {}
+        self._ego_vehicle_id: int | None = None
 
     def start(self) -> None:
         self._thread.start()
@@ -277,32 +575,50 @@ class CarlaCollector:
         self._sensors.append(sensor)
         sensor.listen(lambda measurement, sensor_id=sensor.id: callback(measurement, sensor_id))
 
-    def _attach_sensors(self, world: carla.World, vehicle: carla.Vehicle) -> None:
+    def _attach_sensors(
+        self, client: carla.Client, world: carla.World, vehicle: carla.Vehicle
+    ) -> None:
         origin = carla.Transform()
-        self._spawn_sensor(
-            world,
-            vehicle,
-            "sensor.camera.rgb",
-            carla.Transform(carla.Location(x=1.5, z=2.4)),
-            {"image_size_x": "640", "image_size_y": "480", "fov": "90", "sensor_tick": "0.05"},
-            self._on_camera,
+        sensor_tick = "0.066666"  # Two world ticks at a 30 FPS world rate.
+        sensor_specs = (
+            (
+                "sensor.camera.rgb",
+                carla.Transform(carla.Location(x=1.5, z=2.4)),
+                {"image_size_x": "640", "image_size_y": "480", "fov": "90", "sensor_tick": sensor_tick},
+                self._on_camera,
+            ),
+            (
+                "sensor.other.radar",
+                carla.Transform(carla.Location(x=2.2, z=0.7)),
+                {"range": "100", "horizontal_fov": "35", "vertical_fov": "20",
+                 "points_per_second": "1500", "sensor_tick": sensor_tick},
+                self._on_radar,
+            ),
+            ("sensor.other.imu", origin, {"sensor_tick": sensor_tick}, self._on_imu),
+            ("sensor.other.gnss", origin, {"sensor_tick": sensor_tick}, self._on_gnss),
         )
-        self._spawn_sensor(
-            world,
-            vehicle,
-            "sensor.other.radar",
-            carla.Transform(carla.Location(x=2.2, z=0.7)),
-            {
-                "range": "100",
-                "horizontal_fov": "35",
-                "vertical_fov": "20",
-                "points_per_second": "1500",
-                "sensor_tick": "0.05",
-            },
-            self._on_radar,
-        )
-        self._spawn_sensor(world, vehicle, "sensor.other.imu", origin, {"sensor_tick": "0.05"}, self._on_imu)
-        self._spawn_sensor(world, vehicle, "sensor.other.gnss", origin, {"sensor_tick": "0.05"}, self._on_gnss)
+        commands = []
+        for name, placement, attributes, _callback in sensor_specs:
+            blueprint = world.get_blueprint_library().find(name)
+            for key, value in attributes.items():
+                blueprint.set_attribute(key, value)
+            commands.append(carla.command.SpawnActor(blueprint, placement, vehicle.id))
+        responses = client.apply_batch_sync(commands, False)
+        spawned = [response.actor_id for response in responses if not response.error]
+        if len(responses) != len(sensor_specs) or any(response.error for response in responses):
+            for actor_id in spawned:
+                actor = world.get_actor(actor_id)
+                if actor is not None:
+                    actor.destroy()
+            errors = [response.error for response in responses if response.error]
+            raise RuntimeError(f"Sensor batch spawn failed: {errors}")
+        for actor_id, (_name, _placement, _attributes, callback) in zip(spawned, sensor_specs):
+            sensor = world.get_actor(actor_id)
+            if sensor is None:
+                raise RuntimeError(f"Sensor {actor_id} missing after batch spawn")
+            self._sensors.append(sensor)
+            sensor.listen(lambda measurement, sensor_id=actor_id, handler=callback:
+                          handler(measurement, sensor_id))
         self._spawn_sensor(world, vehicle, "sensor.other.collision", origin, {}, self._on_collision)
         self._spawn_sensor(world, vehicle, "sensor.other.lane_invasion", origin, {}, self._on_lane)
 
@@ -336,9 +652,14 @@ class CarlaCollector:
             width=int(image.width),
             height=int(image.height),
             bgra=bytes(image.raw_data),
+            sensor_id=sensor_id,
+            fov=float(image.fov),
+            sensor_transform=transform(image.transform),
         )
         self.state.update("camera", frame)
         self.recorder.record_camera(frame, sensor_id)
+        if self.on_camera_frame is not None:
+            self.on_camera_frame()
 
     def _on_radar(self, measurement: carla.RadarMeasurement, sensor_id: int) -> None:
         data = self._base("radar", measurement, sensor_id)
@@ -402,6 +723,91 @@ class CarlaCollector:
         self.state.update("vehicle", data)
         self.recorder.record(data)
 
+    def _refresh_vehicle_metadata(self, world: carla.World) -> None:
+        with self._actors_lock:
+            previous = dict(self._vehicle_metadata)
+        metadata: dict[int, dict[str, Any]] = {}
+        for vehicle in world.get_actors().filter("vehicle.*"):
+            actor_id = int(vehicle.id)
+            type_id = str(vehicle.type_id)
+            cached = previous.get(actor_id)
+            if cached is not None and cached["type_id"] == type_id:
+                metadata[actor_id] = cached
+                continue
+            try:
+                bounds = vehicle.bounding_box
+            except RuntimeError:
+                continue  # The vehicle may have disappeared after the actor list was read.
+            metadata[actor_id] = {
+                "actor_id": actor_id,
+                "type_id": type_id,
+                "bounding_box": {
+                    "location": vector(bounds.location),
+                    "extent": vector(bounds.extent),
+                },
+            }
+        with self._actors_lock:
+            self._vehicle_metadata = metadata
+
+    @staticmethod
+    def _rotate_local(point: tuple[float, float, float], rotation: Any) -> tuple[float, float, float]:
+        pitch, yaw, roll = (math.radians(float(getattr(rotation, axis)))
+                            for axis in ("pitch", "yaw", "roll"))
+        cp, sp, cy, sy, cr, sr = (
+            math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw),
+            math.cos(roll), math.sin(roll),
+        )
+        matrix = (
+            (cp * cy, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr),
+            (cp * sy, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr),
+            (sp, -cp * sr, cp * cr),
+        )
+        return tuple(sum(matrix[row][col] * point[col] for col in range(3)) for row in range(3))
+
+    def _on_world_snapshot(self, snapshot: carla.WorldSnapshot) -> None:
+        with self._actors_lock:
+            metadata = dict(self._vehicle_metadata)
+            ego_vehicle_id = self._ego_vehicle_id
+        if ego_vehicle_id is None:
+            return
+        ego_snapshot = snapshot.find(ego_vehicle_id)
+        if ego_snapshot is None:
+            return
+        ego_transform = ego_snapshot.get_transform()
+        vehicles = []
+        for actor_id, vehicle_data in metadata.items():
+            actor_snapshot = snapshot.find(actor_id)
+            if actor_snapshot is None:
+                continue
+            vehicles.append({
+                **vehicle_data,
+                "transform": transform(actor_snapshot.get_transform()),
+                "velocity_mps": vector(actor_snapshot.get_velocity()),
+            })
+        ego_meta = metadata.get(ego_vehicle_id)
+        if ego_meta is None:
+            return
+        bounds = ego_meta["bounding_box"]
+        center = bounds["location"]
+        extent = bounds["extent"]
+        ground_offset = self._rotate_local(
+            (center["x"], center["y"], center["z"] - extent["z"]),
+            ego_transform.rotation,
+        )
+        ego_location = ego_transform.location
+        data = {
+            "schema_version": 1,
+            "kind": "ground_truth",
+            "frame": int(snapshot.frame),
+            "simulation_timestamp": float(snapshot.timestamp.elapsed_seconds),
+            "ego_actor_id": int(ego_vehicle_id),
+            "ego_transform": transform(ego_transform),
+            "ego_ground_z": float(ego_location.z + ground_offset[2]),
+            "vehicles": vehicles,
+        }
+        self.state.update("ground_truth", data)
+        self.recorder.record(data)
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -414,9 +820,13 @@ class CarlaCollector:
                     self.state.clear(f"'{self.role}' 차량을 기다리는 중")
                     self._stop.wait(2.0)
                     continue
-                self._attach_sensors(world, vehicle)
+                self._attach_sensors(client, world, vehicle)
+                self._ego_vehicle_id = int(vehicle.id)
+                self._refresh_vehicle_metadata(world)
+                self._world_callback_id = world.on_tick(self._on_world_snapshot)
                 self.state.set_status(f"연결됨 · {world.get_map().name.split('/')[-1]} · 차량 {vehicle.id}")
                 last_frame = -1
+                last_actor_refresh = time.monotonic()
                 while not self._stop.is_set():
                     snapshot = world.get_snapshot()
                     if snapshot.frame != last_frame:
@@ -425,9 +835,21 @@ class CarlaCollector:
                             raise RuntimeError("모니터링 차량이 사라졌습니다")
                         self._update_vehicle(actor, snapshot, vehicle.id)
                         last_frame = snapshot.frame
+                    if time.monotonic() - last_actor_refresh >= 1.0:
+                        self._refresh_vehicle_metadata(world)
+                        last_actor_refresh = time.monotonic()
                     self._stop.wait(0.03)
             except Exception as exc:
                 self.state.clear(f"CARLA 대기/재연결: {exc}")
                 self._stop.wait(2.0)
             finally:
+                if self._world_callback_id is not None:
+                    try:
+                        world.remove_on_tick(self._world_callback_id)
+                    except (RuntimeError, UnboundLocalError):
+                        pass
+                    self._world_callback_id = None
+                self._ego_vehicle_id = None
+                with self._actors_lock:
+                    self._vehicle_metadata.clear()
                 self._destroy_sensors()
