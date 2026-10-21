@@ -1,13 +1,6 @@
-
-
-https://github.com/user-attachments/assets/36d4de03-e4c1-4a1a-bb67-31770207d0ca
-
-
-
-
 # CARLA RadarVision
 CARLA 가상 주행 환경에서 **카메라로 차량을 검출·추적하고 레이더 측정값을 결합해 차량 간 거리를 추정**하는 프로젝트입니다. 실행 중인 차량에 카메라·레이더 등의 센서를 부착하고, 결과를 Qt 화면에 표시하거나 세션으로 저장합니다.
-
+https://github.com/user-attachments/assets/3348c5f7-52f8-4de5-afcb-39ad1498cd0f
 **시뮬레이션 기반 검증**
 CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소를 준비하지 않고도 영상처리 파이프라인을 검증할 수 있습니다. 장비 대여·설치와 도로 시험에 드는 비용과 준비 시간을 줄이고, 같은 주행 조건을 반복 재현해 결과를 빠르게 비교할 수 있습니다.
 
@@ -21,6 +14,10 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 
 **대시보드(클릭확대)**
 <img width="1920" height="1032" alt="화면 캡처 2026-10-21 205048" src="https://github.com/user-attachments/assets/dd5716e2-fe36-4a0a-a560-778df2872f98" />
+
+https://github.com/user-attachments/assets/3629aa13-f256-4f48-b06e-728a39ea4463
+
+
 
 
 
