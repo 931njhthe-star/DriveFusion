@@ -21,17 +21,6 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 ## 어떻게 동작하나요?
 <img width="1672" height="940" alt="flow" src="https://github.com/user-attachments/assets/8133445e-add3-4e75-9d26-4ab0d1940032" />
 
-```text
-CARLA 주행 장면
-  ├─ RGB 카메라 영상 → C++/CUDA YOLO11n 차량 검출 → 차량별 ID 추적
-  └─ 레이더 검출점 ────────────────────────┐
-                                         ↓
-                         같은 프레임의 차량 검출과 레이더 점 연결
-                                         ↓
-                         차량 간 거리 추정 · Qt 표시 · 세션 기록
-                                         ↓
-                         CARLA 정답 거리와 세 방법의 오차 비교
-```
 
 YOLO11n 검출기는 TensorRTx의 **C++/CUDA DLL**과 TensorRT 엔진으로 실행합니다. Python 작업자가 카메라 프레임을 DLL에 전달하고, 검출 결과를 추적 알고리즘과 연결합니다. 추적·레이더 점 처리·거리 계산·Qt 화면·기록·평가는 현재 Python으로 구현되어 있습니다. 따라서 프로젝트 전체가 C++로 작성된 것은 아닙니다.
 
