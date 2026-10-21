@@ -1,6 +1,5 @@
 
 # CARLA RadarVision
-<img width="1672" height="940" alt="flow" src="https://github.com/user-attachments/assets/8133445e-add3-4e75-9d26-4ab0d1940032" />
 CARLA 가상 주행 환경에서 **카메라로 차량을 검출·추적하고 레이더 측정값을 결합해 차량 간 거리를 추정**하는 프로젝트입니다. 실행 중인 `hero` 차량에 카메라·레이더 등의 센서를 부착하고, 결과를 Qt 화면에 표시하거나 세션으로 저장합니다.
 
 **시뮬레이션 기반 검증**
@@ -14,12 +13,13 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 - 안전한 시험: 위험 상황이나 재현이 어려운 조건을 시뮬레이션에서 검증
 시뮬레이션 결과는 통제된 가상 환경에서의 검증 결과이며, 실제 도로 환경의 성능을 그대로 보장하지는 않습니다.
 
+**대시보드**
 <img width="1920" height="1032" alt="화면 캡처 2026-10-21 205048" src="https://github.com/user-attachments/assets/dd5716e2-fe36-4a0a-a560-778df2872f98" />
 
 
 
 ## 어떻게 동작하나요?
-
+<img width="1672" height="940" alt="flow" src="https://github.com/user-attachments/assets/8133445e-add3-4e75-9d26-4ab0d1940032" />
 ```text
 CARLA 주행 장면
   ├─ RGB 카메라 영상 → C++/CUDA YOLO11n 차량 검출 → 차량별 ID 추적
