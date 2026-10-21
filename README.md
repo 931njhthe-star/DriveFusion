@@ -15,7 +15,6 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 시뮬레이션 결과는 통제된 가상 환경에서의 검증 결과이며, 실제 도로 환경의 성능을 그대로 보장하지는 않습니다.
 
 **대시보드(클릭확대)**
-<img width="1920" height="1032" alt="화면 캡처 2026-10-21 205048" src="https://github.com/user-attachments/assets/dd5716e2-fe36-4a0a-a560-778df2872f98" />
 
 https://github.com/user-attachments/assets/3629aa13-f256-4f48-b06e-728a39ea4463
 
