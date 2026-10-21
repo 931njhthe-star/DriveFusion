@@ -27,13 +27,6 @@ YOLO11n 검출기는 TensorRTx의 C++/CUDA DLL과 TensorRT 엔진으로 실행�
 **Python**
 작업자가 카메라 프레임을 DLL에 전달하고, 검출 결과를 추적 알고리즘과 연결합니다. 추적·레이더 점 처리·거리 계산·Qt 화면·기록·평가는 현재 Python으로 구현되어 있습니다.
 
-| 처리 | 현재 하는 일 |
-| --- | --- | --- |
-| 센서 수집 | CARLA의 RGB 카메라·레이더·차량 상태·IMU·GNSS·충돌·차선 이탈 데이터를 프레임 번호와 함께 수집 |
-| 검출과 추적 | YOLO가 영상 속 차량 상자를 찾고, 영상 추적기와 레이더 보조 추적기가 차량 ID를 이어감 |
-| 센서 융합 | 레이더 점을 영상에 투영해 차량 상자와 연결하고, 유효한 가까운 점 묶음으로 카메라 거리 추정을 보정 |
-| 화면과 평가 | 원본·검출·추적·융합 화면을 비교하고, 저장 세션에서 추정 거리와 CARLA 정답을 비교 |
-
 현재 구현 범위와 남은 작업은 [프로젝트 개요](docs/PROJECT_OVERVIEW.md), 거리 계산의 전체 규칙은 [거리 추정 기록](docs/DISTANCE_ESTIMATION.md)에 정리했습니다.
 
 
@@ -77,12 +70,6 @@ YOLO11n 검출기는 TensorRTx의 C++/CUDA DLL과 TensorRT 엔진으로 실행�
 - 차량: 위치, 방향, 이동 속도, 속도 벡터
 - IMU: 가속도, 각속도, 나침반 / GNSS: 위도, 경도, 고도
 - 충돌과 차선 이탈: 감지된 이벤트 목록
-
-기록 버튼을 누르면 `data/recordings/YYYYMMDD_HHMMSS_ffffff_standard/`, `_yolo/`, `_tracking/`, `_radar_fusion/` 세션이 시작됩니다. `camera/`에는 JPEG 프레임, `measurements.jsonl`에는 센서 측정값과 프레임 번호·시뮬레이션 타임스탬프·수신 시각을 저장합니다. YOLO와 AI 트래킹 세션에는 `detections.jsonl`이 생깁니다. 두 트래킹 세션에는 `tracks.jsonl`, CARLA 차량 기준 데이터 `ground_truth.jsonl`, 위치 비교 `positions.jsonl`이 추가됩니다. `_tracking`은 카메라 단독 추적·위치 기준선이며, `_radar_fusion`은 일반 영상 트랙을 `vision_tracks.jsonl`에, 레이더 보조 트랙을 `tracks.jsonl`에 함께 저장하고 융합 추정값도 `radar_fusion.jsonl`에 별도로 기록합니다. 중지하면 `accuracy_summary.json`에 위치 MAE/RMSE·매칭 범위·레이더 프레임 정렬 통계를 만듭니다. 정답 차량 위치는 오차 평가와 트랙 ID 확인에만 쓰고, 차량의 위치 추정에는 현재 ego 위치·지면 높이만 좌표 기준으로 사용합니다. 기록을 멈추면 대기 중인 데이터를 저장하고 파일을 닫습니다. 저장 대기열이 밀리면 누락 수를 화면에 표시합니다. 이 기록 디렉터리는 Git에서 제외됩니다.
-
-저장 영상을 비교하려면 **저장 세션 전체 비교 영상 생성**을 누르고 `*_radar_fusion` 세션을 선택하세요. 원본, YOLO, 일반 트래킹, 레이더 융합 트래킹을 2×2 화면에 담은 `comparison_videos/all_views.mp4`를 만듭니다. 새 기록은 일반 트래킹과 융합 트랙을 각각 저장합니다. 예전 융합 기록에 `vision_tracks.jsonl`이 없으면 저장된 YOLO 검출을 다시 재생해 일반 트래킹 기준선을 복원합니다. 탐지·일반 트래킹·레이더 융합 오버레이 이미지도 각각 `annotated/`, `tracked/`, `radar_fusion/`에 생성합니다. MP4 인코딩을 위해 `ffmpeg`가 설치되어 PATH에서 실행 가능해야 합니다. 원본 JPEG와 JSONL은 수정하지 않으며, 생성 작업은 백그라운드에서 실행됩니다.
-
-Qt 앱이 만든 센서만 종료 시 제거하며, 기존 차량과 기존 센서는 유지합니다.
 
 
 ## Windows 실행
