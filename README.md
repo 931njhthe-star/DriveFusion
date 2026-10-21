@@ -1,4 +1,10 @@
 
+
+https://github.com/user-attachments/assets/36d4de03-e4c1-4a1a-bb67-31770207d0ca
+
+
+
+
 # CARLA RadarVision
 CARLA 가상 주행 환경에서 **카메라로 차량을 검출·추적하고 레이더 측정값을 결합해 차량 간 거리를 추정**하는 프로젝트입니다. 실행 중인 차량에 카메라·레이더 등의 센서를 부착하고, 결과를 Qt 화면에 표시하거나 세션으로 저장합니다.
 
