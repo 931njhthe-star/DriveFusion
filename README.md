@@ -103,3 +103,21 @@ PowerShell에서 실행하려면:
 
 앱 시작만으로 기록하지 않습니다. **일반 기록 시작**은 원본 영상과 센서 데이터를, **YOLO 기록 시작**은 탐지 결과를, **YOLO+트래킹 기록 시작**은 영상 추적 기준선을, **YOLO+레이더 융합 기록 시작**은 영상 전용 결과와 레이더 보조 추적 결과를 함께 저장합니다. 네 기록 모드는 동시에 사용할 수 없습니다. AI 기록 버튼은 필요한 탐지·트래킹을 자동으로 켭니다.
 
+### WSL2 Linux YOLO 서버
+
+이전 README에 있던 WSL2 검출기 실행 방법입니다. Ubuntu 터미널에서 서버를 실행하면 TensorRT 엔진을 메모리에 유지하고 `127.0.0.1:8765`에서 검출 요청을 받습니다. 아래 경로는 당시 개발 환경 기준이므로 설치 위치에 맞게 바꾸세요.
+
+```bash
+cd /home/nozy/build/yolo11-linux
+export LD_LIBRARY_PATH="$HOME/opt/TensorRT-10.16.1.11/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+./yolo11_server --engine ./yolo11n.linux.engine --address 127.0.0.1 --port 8765
+```
+
+이전 버전에서는 Windows 대시보드의 **검출기** 목록에서 `Windows DLL` 또는 `WSL Linux`를 선택했습니다. Windows DLL 없이 WSL 서버에 연결할 때는 다음 명령을 사용했고, 접속 주소가 다르면 `--wsl-host`와 `--wsl-port`로 지정했습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m monitor.qt.app --wsl-yolo
+```
+
+현재 체크아웃에는 `--wsl-yolo` 옵션과 검출기 선택 UI가 없어 위 Windows 연결 명령은 아직 실행할 수 없습니다. WSL 서버 연동 코드를 복구한 뒤 사용하세요.
+
