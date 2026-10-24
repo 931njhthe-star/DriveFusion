@@ -14,7 +14,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -39,6 +42,8 @@ from monitor.qt.yolo_overlay_generator import (
     OverlayGenerationSummary,
     OverlayGeneratorThread,
 )
+from monitor.qt.weather_workflow import WeatherWorkflowDialog
+from monitor.qt.traffic_lights import TrafficLightControlThread, TrafficLightResult
 
 
 class RadarPlot(QWidget):
@@ -114,6 +119,7 @@ def field(grid: QGridLayout, row: int, title: str) -> QLabel:
 
 class MonitorWindow(QMainWindow):
     camera_frame_ready = Signal()
+    recording_finished = Signal(bool)
 
     def __init__(self, collector: CarlaCollector, recorder: SessionRecorder,
                  yolo_worker: YoloWorker | None = None) -> None:
@@ -126,6 +132,14 @@ class MonitorWindow(QMainWindow):
         self._radar_fusion_enabled_before_record = False
         self._overlay_generator: OverlayGeneratorThread | None = None
         self._experiment_evaluator: ExperimentEvaluatorThread | None = None
+        self._recording_active = False
+        self._recording_deadline: float | None = None
+        self._recording_auto_stop = False
+        self._workflow_metadata: dict[str, Any] | None = None
+        self._weather_workflow_dialog: WeatherWorkflowDialog | None = None
+        self._traffic_light_thread: TrafficLightControlThread | None = None
+        self._traffic_light_settings: dict[str, Any] | None = None
+        self._video_focus_splitter_sizes: list[int] | None = None
         self.last_camera_frame = -1
         self.last_detection_received_at: tuple[Any, ...] | None = None
         self.last_radar_frame = -1
@@ -135,6 +149,9 @@ class MonitorWindow(QMainWindow):
         self.resize(1500, 900)
         self._build_ui()
         self._apply_style()
+        self.recording_timer = QTimer(self)
+        self.recording_timer.setInterval(250)
+        self.recording_timer.timeout.connect(self._update_recording_clock)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(200)
@@ -181,9 +198,13 @@ class MonitorWindow(QMainWindow):
         self.radar_fusion_record_button.setEnabled(False)
         self.radar_fusion_record_button.toggled.connect(self._toggle_radar_fusion_recording)
         header.addWidget(self.radar_fusion_record_button)
+        self.weather_workflow_button = QPushButton("날씨 수집 워크플로")
+        self.weather_workflow_button.clicked.connect(self._open_weather_workflow)
+        header.addWidget(self.weather_workflow_button)
         outer.addLayout(header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter = splitter
         outer.addWidget(splitter, 1)
 
         left = QWidget()
@@ -205,6 +226,36 @@ class MonitorWindow(QMainWindow):
         self.tracking_toggle.setEnabled(False)
         self.tracking_toggle.toggled.connect(self._toggle_tracking)
         detection_controls.addWidget(self.tracking_toggle)
+        detection_controls.addWidget(QLabel("추적 유지"))
+        self.tracking_max_lost_frames = QSpinBox()
+        self.tracking_max_lost_frames.setRange(0, 100)
+        self.tracking_max_lost_frames.setValue(
+            getattr(self.yolo_worker, "max_lost_frames", 10))
+        self.tracking_max_lost_frames.setSuffix(" 프레임")
+        self.tracking_max_lost_frames.setToolTip(
+            "YOLO 검출이 끊긴 뒤 트랙을 예측 상태로 유지할 처리 프레임 수. "
+            "변경하면 현재 추적 ID가 초기화됩니다.")
+        self.tracking_max_lost_frames.setEnabled(self.yolo_worker is not None)
+        self.tracking_max_lost_frames.valueChanged.connect(self._set_tracking_max_lost_frames)
+        detection_controls.addWidget(self.tracking_max_lost_frames)
+        self.radar_correction_toggle = QPushButton()
+        self.radar_correction_toggle.setCheckable(True)
+        self.radar_correction_toggle.setChecked(
+            getattr(self.yolo_worker, "radar_track_correction_enabled", False))
+        self.radar_correction_toggle.setText(
+            "레이더 위치 보정 켜짐" if self.radar_correction_toggle.isChecked()
+            else "레이더 위치 보정 꺼짐")
+        self.radar_correction_toggle.setEnabled(self.yolo_worker is not None)
+        self.radar_correction_toggle.setToolTip(
+            "실험 기능: YOLO 미검출 중 레이더로 예측 트랙을 보정합니다. "
+            "변경하면 레이더 추적 ID가 초기화됩니다.")
+        self.radar_correction_toggle.toggled.connect(self._set_radar_track_correction_enabled)
+        detection_controls.addWidget(self.radar_correction_toggle)
+        self.video_focus_button = QPushButton("영상 크게 보기")
+        self.video_focus_button.setCheckable(True)
+        self.video_focus_button.setToolTip("분석·계기판 영역을 접어 비교 영상을 세로로 크게 봅니다.")
+        self.video_focus_button.toggled.connect(self._toggle_video_focus)
+        detection_controls.addWidget(self.video_focus_button)
         self.yolo_config_info = QLabel(
             "YOLO DLL·엔진 옵션 필요" if self.yolo_worker is None else "YOLO11n 준비 중"
         )
@@ -253,10 +304,41 @@ class MonitorWindow(QMainWindow):
         self.generator_info = QLabel("원본·YOLO·영상 트래킹·레이더 융합을 2×2 비교 영상으로 생성합니다")
         self.generator_info.setWordWrap(True)
         left_layout.addWidget(self.generator_info)
-        self.evaluate_button = QPushButton("저장 세션 3~15m 실험 결과 생성")
+        evaluation_controls = QWidget()
+        evaluation_range = QHBoxLayout(evaluation_controls)
+        evaluation_range.setContentsMargins(0, 0, 0, 0)
+        evaluation_range.addWidget(QLabel("평가 거리"))
+        self.evaluation_range = QComboBox()
+        for label, bounds in (
+            ("전체 거리 (구간별)", (0.0, None, True)),
+            ("0~3m", (0.0, 3.0, False)),
+            ("3~5m", (3.0, 5.0, False)),
+            ("5~10m", (5.0, 10.0, False)),
+            ("10~15m", (10.0, 15.0, False)),
+            ("3~15m (기존)", (3.0, 15.0, True)),
+            ("15~20m", (15.0, 20.0, False)),
+            ("20~30m", (20.0, 30.0, False)),
+            ("30m 이상", (30.0, None, True)),
+            ("사용자 지정", None),
+        ):
+            self.evaluation_range.addItem(label, bounds)
+        evaluation_range.addWidget(self.evaluation_range)
+        self.evaluation_min = QDoubleSpinBox()
+        self.evaluation_max = QDoubleSpinBox()
+        for distance_input in (self.evaluation_min, self.evaluation_max):
+            distance_input.setRange(0.0, 1000.0)
+            distance_input.setDecimals(1)
+            distance_input.setSuffix(" m")
+            distance_input.setEnabled(False)
+            evaluation_range.addWidget(distance_input)
+        self.evaluation_min.setValue(3.0)
+        self.evaluation_max.setValue(15.0)
+        self.evaluation_range.currentIndexChanged.connect(self._evaluation_range_changed)
+        left_layout.addWidget(evaluation_controls)
+        self.evaluate_button = QPushButton("저장 세션/날씨 워크플로 결과 생성")
         self.evaluate_button.clicked.connect(self._evaluate_saved_session)
         left_layout.addWidget(self.evaluate_button)
-        self.evaluation_info = QLabel("CARLA GT 기준 3~15m 차량의 세 위치 추정 방법을 비교합니다.")
+        self.evaluation_info = QLabel("실제 관측된 차량의 거리 오차를 구간별로 비교하고 예측 트랙은 별도로 집계합니다.")
         self.evaluation_info.setWordWrap(True)
         left_layout.addWidget(self.evaluation_info)
         left_layout.addWidget(self.camera_info)
@@ -271,6 +353,10 @@ class MonitorWindow(QMainWindow):
             "frame": field(vehicle_grid, 4, "프레임 / 시뮬레이션 시간"),
         }
         left_layout.addWidget(vehicle_group)
+        self._video_detail_widgets = (
+            self.generate_boxes_button, self.generator_info, evaluation_controls,
+            self.evaluate_button, self.evaluation_info, self.camera_info, vehicle_group,
+        )
         splitter.addWidget(left)
 
         scroll = QScrollArea()
@@ -282,6 +368,7 @@ class MonitorWindow(QMainWindow):
         right_layout.setSpacing(10)
         scroll.setWidget(right)
         splitter.addWidget(scroll)
+        self._telemetry_scroll = scroll
         splitter.setSizes([940, 540])
 
         radar_group = QGroupBox("RADAR · 거리 / 각도 / 상대속도")
@@ -335,8 +422,49 @@ class MonitorWindow(QMainWindow):
         event_layout.addWidget(self.events)
         right_layout.addWidget(event_group)
 
+        traffic_group = QGroupBox("TRAFFIC LIGHTS · 신호등")
+        traffic_layout = QVBoxLayout(traffic_group)
+        traffic_row = QHBoxLayout()
+        self.use_red_lights = QCheckBox("빨간불 사용 (자동 신호 순환)")
+        self.use_red_lights.toggled.connect(self._set_red_duration_enabled)
+        traffic_row.addWidget(self.use_red_lights)
+        self.red_light_seconds = QSpinBox()
+        self.red_light_seconds.setRange(1, 300)
+        self.red_light_seconds.setValue(15)
+        self.red_light_seconds.setSuffix("초")
+        self.red_light_seconds.setEnabled(False)
+        self.red_light_seconds.setToolTip(
+            "한 방향의 빨간 대기 목표 시간입니다. 초록 10초·노랑 3초는 유지하며 "
+            "교차로 구조상 불가능하면 최소 대기 시간을 적용합니다.")
+        traffic_row.addWidget(self.red_light_seconds)
+        traffic_layout.addLayout(traffic_row)
+        self.apply_traffic_lights_button = QPushButton("신호등 설정 적용")
+        self.apply_traffic_lights_button.clicked.connect(self._apply_traffic_light_settings)
+        traffic_layout.addWidget(self.apply_traffic_lights_button)
+        self.traffic_light_info = QLabel("미적용 · 끄면 모든 신호등을 초록불로 고정합니다.")
+        self.traffic_light_info.setWordWrap(True)
+        traffic_layout.addWidget(self.traffic_light_info)
+        right_layout.addWidget(traffic_group)
+
         record_group = QGroupBox("RECORDING · 수집 데이터 저장")
         record_layout = QVBoxLayout(record_group)
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(QLabel("기록 시간"))
+        self.record_minutes = QSpinBox()
+        self.record_minutes.setRange(0, 120)
+        self.record_minutes.setSuffix("분")
+        self.record_minutes.setToolTip("0분 0초는 수동 기록입니다.")
+        duration_row.addWidget(self.record_minutes)
+        self.record_seconds = QSpinBox()
+        self.record_seconds.setRange(0, 59)
+        self.record_seconds.setSuffix("초")
+        self.record_seconds.setToolTip("0분 0초는 수동 기록입니다.")
+        duration_row.addWidget(self.record_seconds)
+        record_layout.addLayout(duration_row)
+        self.recording_timer_info = QLabel("0분 0초: 중지 버튼을 누를 때까지 수동 기록")
+        record_layout.addWidget(self.recording_timer_info)
+        self.record_minutes.valueChanged.connect(self._update_recording_duration_hint)
+        self.record_seconds.valueChanged.connect(self._update_recording_duration_hint)
         self.record_info = QLabel("기록 대기 중")
         self.record_info.setWordWrap(True)
         record_layout.addWidget(self.record_info)
@@ -405,7 +533,8 @@ class MonitorWindow(QMainWindow):
             for track in view_tracks:
                 estimate = objects.get(int(track.track_id), {})
                 radar_used = estimate.get("distance_source") == "radar_near_cluster"
-                color = (QColor("#51c9ff") if radar_used else QColor("#f5d76e")) \
+                color = (QColor("#51c9ff") if track.radar_corrected else
+                         QColor("#51c9ff") if radar_used else QColor("#f5d76e")) \
                     if view == "radar_fusion" else (
                         QColor("#f5d76e") if track.predicted else QColor("#4ee38b")
                     )
@@ -423,6 +552,8 @@ class MonitorWindow(QMainWindow):
                     label = f"ID {track.track_id}  C{track.class_id} {track.confidence:.2f}"
                 if track.predicted:
                     label += f" · 누락 {track.missed_frames}"
+                    if view == "radar_fusion" and track.radar_corrected:
+                        label += " · 레이더 보정"
                 painter.drawText(track.x, max(14, track.y - 4), label)
         painter.end()
         return image
@@ -434,10 +565,183 @@ class MonitorWindow(QMainWindow):
             Qt.TransformationMode.FastTransformation,
         ))
 
+    def _recording_duration_seconds(self) -> int:
+        return self.record_minutes.value() * 60 + self.record_seconds.value()
+
+    def _recording_weather(self) -> dict[str, Any] | None:
+        if self._workflow_metadata is not None:
+            return self._workflow_metadata["weather_parameters"]
+        state = getattr(self.collector, "state", None)
+        return state.snapshot().get("weather") if state is not None else None
+
+    def _set_red_duration_enabled(self, enabled: bool) -> None:
+        self.red_light_seconds.setEnabled(enabled)
+
+    def _apply_traffic_light_settings(self) -> None:
+        if self._traffic_light_thread is not None:
+            return
+        use_red = self.use_red_lights.isChecked()
+        red_seconds = float(self.red_light_seconds.value())
+        thread = TrafficLightControlThread(
+            self.collector.host, self.collector.port, use_red, red_seconds, self)
+        self._traffic_light_thread = thread
+        self.apply_traffic_lights_button.setEnabled(False)
+        self.traffic_light_info.setText("CARLA 신호등 설정 적용 중…")
+        thread.applied.connect(self._traffic_light_applied)
+        thread.failed.connect(self._traffic_light_failed)
+        thread.finished.connect(self._traffic_light_finished)
+        thread.start()
+
+    def _traffic_light_applied(self, result: TrafficLightResult,
+                               use_red: bool, red_seconds: float) -> None:
+        self._traffic_light_settings = {
+            "red_enabled": use_red,
+            "red_seconds": red_seconds if use_red else None,
+            "expected_red_min_seconds": result.expected_red_min_seconds,
+            "expected_red_max_seconds": result.expected_red_max_seconds,
+            "green_seconds": 10.0 if use_red else None,
+            "yellow_seconds": 3.0 if use_red else None,
+            "traffic_light_count": result.light_count,
+        }
+        if use_red:
+            minimum = result.expected_red_min_seconds
+            maximum = result.expected_red_max_seconds
+            if minimum is None or maximum is None:
+                raise RuntimeError("Missing traffic-light timing result")
+            actual = (f"{minimum:g}초" if abs(minimum - maximum) < 0.01
+                      else f"{minimum:g}~{maximum:g}초")
+            self.traffic_light_info.setText(
+                f"신호등 {result.light_count}개: 초록 10초·노랑 3초, "
+                f"빨간불 요청 {red_seconds:g}초 → 예상 대기 {actual}")
+        else:
+            self.traffic_light_info.setText(f"신호등 {result.light_count}개: 초록불 고정")
+
+    def _traffic_light_failed(self, message: str) -> None:
+        self.traffic_light_info.setText(f"신호등 설정 실패: {message}")
+
+    def _traffic_light_finished(self) -> None:
+        thread = self._traffic_light_thread
+        self._traffic_light_thread = None
+        self.apply_traffic_lights_button.setEnabled(True)
+        if thread is not None:
+            thread.deleteLater()
+
+    def _open_weather_workflow(self) -> None:
+        if self._weather_workflow_dialog is None:
+            self._weather_workflow_dialog = WeatherWorkflowDialog(self)
+        self._weather_workflow_dialog.show()
+        self._weather_workflow_dialog.raise_()
+        self._weather_workflow_dialog.activateWindow()
+
+    def start_workflow_recording(self, mode: str, duration_seconds: int,
+                                 metadata: dict[str, Any]) -> bool:
+        if self.recorder.is_enabled() or not 1 <= duration_seconds <= 7259:
+            return False
+        button = {
+            "standard": self.record_button,
+            "yolo": self.yolo_record_button,
+            "tracking": self.tracking_record_button,
+            "radar_fusion": self.radar_fusion_record_button,
+        }.get(mode)
+        if button is None or not button.isEnabled():
+            return False
+        minutes, seconds = divmod(duration_seconds, 60)
+        self.record_minutes.setValue(minutes)
+        self.record_seconds.setValue(seconds)
+        self._workflow_metadata = metadata
+        try:
+            button.click()
+            return self.recorder.is_enabled() and self.recorder.mode == mode
+        finally:
+            self._workflow_metadata = None
+
+    def stop_workflow_recording(self) -> None:
+        button = {
+            "standard": self.record_button,
+            "yolo": self.yolo_record_button,
+            "tracking": self.tracking_record_button,
+            "radar_fusion": self.radar_fusion_record_button,
+        }.get(self.recorder.mode)
+        if button is not None and button.isChecked():
+            button.setChecked(False)
+
+    def _update_recording_duration_hint(self) -> None:
+        if self._recording_active:
+            return
+        duration = self._recording_duration_seconds()
+        if duration:
+            minutes, seconds = divmod(duration, 60)
+            self.recording_timer_info.setText(
+                f"{minutes}분 {seconds}초 기록 후 자동 중지")
+        else:
+            self.recording_timer_info.setText("0분 0초: 중지 버튼을 누를 때까지 수동 기록")
+
+    def _start_recording_clock(self) -> None:
+        duration = self._recording_duration_seconds()
+        self._recording_active = True
+        self._recording_deadline = time.monotonic() + duration if duration else None
+        self.record_minutes.setEnabled(False)
+        self.record_seconds.setEnabled(False)
+        self.tracking_max_lost_frames.setEnabled(False)
+        self.radar_correction_toggle.setEnabled(False)
+        if duration:
+            self.recording_timer.start()
+            self._update_recording_clock()
+        else:
+            self.recording_timer_info.setText("수동 기록 중 · 중지 버튼으로 종료")
+
+    def _finish_recording_clock(self, reason: str | None = None) -> None:
+        if not self._recording_active:
+            return
+        self.recording_timer.stop()
+        self._recording_active = False
+        self._recording_deadline = None
+        self.record_minutes.setEnabled(True)
+        self.record_seconds.setEnabled(True)
+        self.tracking_max_lost_frames.setEnabled(self.yolo_worker is not None)
+        self.radar_correction_toggle.setEnabled(self.yolo_worker is not None)
+        self.recording_timer_info.setText(
+            reason or ("지정한 시간이 지나 자동으로 기록을 마쳤습니다."
+                       if self._recording_auto_stop else "기록을 중지했습니다.")
+        )
+        self.recording_finished.emit(self._recording_auto_stop)
+
+    def _update_recording_clock(self) -> None:
+        if not self._recording_active or self._recording_deadline is None:
+            return
+        if not self.recorder.is_enabled():
+            self._finish_recording_clock("기록을 중지했습니다.")
+            return
+        remaining = math.ceil(self._recording_deadline - time.monotonic())
+        if remaining > 0:
+            minutes, seconds = divmod(remaining, 60)
+            self.recording_timer_info.setText(f"자동 중지까지 {minutes:02d}:{seconds:02d} 남음")
+            return
+        button = {
+            "standard": self.record_button,
+            "yolo": self.yolo_record_button,
+            "tracking": self.tracking_record_button,
+            "radar_fusion": self.radar_fusion_record_button,
+        }.get(self.recorder.mode)
+        self._recording_auto_stop = True
+        try:
+            if button is not None and button.isChecked():
+                button.setChecked(False)
+            else:
+                self.recorder.stop_session()
+                self._finish_recording_clock()
+        finally:
+            self._recording_auto_stop = False
+
     def _toggle_recording(self, enabled: bool) -> None:
         if enabled:
             try:
-                self.recorder.start_session("standard")
+                self.recorder.start_session(
+                    "standard", planned_duration_seconds=self._recording_duration_seconds() or None,
+                    weather=self._recording_weather(),
+                    traffic_lights=self._traffic_light_settings,
+                    **({"weather_workflow": self._workflow_metadata}
+                       if self._workflow_metadata is not None else {}))
             except Exception as exc:
                 self._set_checked(self.record_button, False)
                 self.record_info.setText(f"기록 시작 실패: {exc}")
@@ -446,8 +750,10 @@ class MonitorWindow(QMainWindow):
             self.yolo_record_button.setEnabled(False)
             self.tracking_record_button.setEnabled(False)
             self.radar_fusion_record_button.setEnabled(False)
+            self._start_recording_clock()
         else:
             self.recorder.stop_session()
+            self._finish_recording_clock()
             self.record_button.setText("일반 기록 시작")
             self.yolo_record_button.setEnabled(self._yolo_ready())
             self.tracking_record_button.setEnabled(self._yolo_ready())
@@ -504,7 +810,17 @@ class MonitorWindow(QMainWindow):
         self._tracking_enabled_before_record = self.yolo_worker.tracking_enabled
         self._radar_fusion_enabled_before_record = self.yolo_worker.radar_fusion_enabled
         try:
-            self.recorder.start_session(mode, self.yolo_worker.engine_path)
+            self.recorder.start_session(
+                mode, self.yolo_worker.engine_path,
+                planned_duration_seconds=self._recording_duration_seconds() or None,
+                weather=self._recording_weather(),
+                traffic_lights=self._traffic_light_settings,
+                **({"tracking_max_lost_frames": self.tracking_max_lost_frames.value()}
+                   if mode in ("tracking", "radar_fusion") else {}),
+                **({"radar_track_correction_enabled": self.radar_correction_toggle.isChecked()}
+                   if mode == "radar_fusion" else {}),
+                **({"weather_workflow": self._workflow_metadata}
+                   if self._workflow_metadata is not None else {}))
         except Exception as exc:
             self._yolo_enabled_by_record_button = False
             self._tracking_enabled_before_record = False
@@ -526,10 +842,12 @@ class MonitorWindow(QMainWindow):
         self.radar_fusion_record_button.setEnabled(mode == "radar_fusion")
         self.yolo_toggle.setEnabled(False)
         self.tracking_toggle.setEnabled(False)
+        self._start_recording_clock()
         return True
 
     def _stop_ai_recording(self) -> None:
         self.recorder.stop_session()
+        self._finish_recording_clock()
         if self.yolo_worker:
             restore_tracking = self._tracking_enabled_before_record and not self._yolo_enabled_by_record_button
             self.yolo_worker.set_radar_fusion_enabled(self._radar_fusion_enabled_before_record)
@@ -580,6 +898,28 @@ class MonitorWindow(QMainWindow):
         self.yolo_worker.set_tracking_enabled(enabled)
         self.tracking_toggle.setText("트래킹 중지" if enabled else "트래킹 시작")
 
+    def _set_tracking_max_lost_frames(self, frames: int) -> None:
+        if self.yolo_worker is not None:
+            self.yolo_worker.set_max_lost_frames(frames)
+
+    def _set_radar_track_correction_enabled(self, enabled: bool) -> None:
+        if self.yolo_worker is not None:
+            self.yolo_worker.set_radar_track_correction_enabled(enabled)
+        self.radar_correction_toggle.setText(
+            "레이더 위치 보정 켜짐" if enabled else "레이더 위치 보정 꺼짐")
+
+    def _toggle_video_focus(self, enabled: bool) -> None:
+        if enabled:
+            self._video_focus_splitter_sizes = self._main_splitter.sizes()
+        for widget in self._video_detail_widgets:
+            widget.setVisible(not enabled)
+        self._telemetry_scroll.setVisible(not enabled)
+        if not enabled and self._video_focus_splitter_sizes is not None:
+            self._main_splitter.setSizes(self._video_focus_splitter_sizes)
+            self._video_focus_splitter_sizes = None
+        self.video_focus_button.setText("기본 화면으로" if enabled else "영상 크게 보기")
+        self.last_detection_received_at = None
+
     def _generate_saved_yolo_images(self) -> None:
         if self._overlay_generator is not None and self._overlay_generator.isRunning():
             return
@@ -625,13 +965,26 @@ class MonitorWindow(QMainWindow):
         self.generate_boxes_button.setEnabled(True)
         self._overlay_generator = None
 
+    def _evaluation_range_changed(self, _index: int) -> None:
+        custom = self.evaluation_range.currentData() is None
+        self.evaluation_min.setEnabled(custom)
+        self.evaluation_max.setEnabled(custom)
+
     def _evaluate_saved_session(self) -> None:
         if self._experiment_evaluator is not None and self._experiment_evaluator.isRunning():
+            return
+        bounds = self.evaluation_range.currentData()
+        min_distance, max_distance, include_max = (
+            (self.evaluation_min.value(), self.evaluation_max.value(), True)
+            if bounds is None else bounds
+        )
+        if max_distance is not None and max_distance <= min_distance:
+            self.evaluation_info.setText("최대 거리는 최소 거리보다 커야 합니다.")
             return
         recordings_dir = Path("data/recordings").resolve()
         selected = QFileDialog.getExistingDirectory(
             self,
-            "실험 결과를 만들 저장 세션 선택",
+            "실험 결과를 만들 세션 또는 날씨 워크플로 상위 폴더 선택",
             str(recordings_dir if recordings_dir.exists() else Path.cwd()),
         )
         if not selected:
@@ -639,12 +992,13 @@ class MonitorWindow(QMainWindow):
         session_dir = Path(selected)
         active_session = self.recorder.stats()["path"]
         if (self.recorder.is_enabled() and active_session is not None
-                and session_dir.resolve() == active_session.resolve()):
+                and active_session.resolve().is_relative_to(session_dir.resolve())):
             self.evaluation_info.setText("기록 중인 세션입니다. 기록을 중지한 뒤 결과를 생성하세요.")
             return
         self.evaluate_button.setEnabled(False)
-        self.evaluation_info.setText(f"3~15m 실험 결과 계산 중: {session_dir}")
-        worker = ExperimentEvaluatorThread(session_dir, parent=self)
+        self.evaluation_info.setText(f"거리별 실험 결과 계산 중: {session_dir}")
+        worker = ExperimentEvaluatorThread(session_dir, min_distance, max_distance,
+                                           include_max, parent=self)
         self._experiment_evaluator = worker
         worker.completed.connect(self._evaluation_completed)
         worker.failed.connect(self._evaluation_failed)
@@ -652,11 +1006,31 @@ class MonitorWindow(QMainWindow):
         worker.start()
 
     def _evaluation_completed(self, summary: dict[str, Any]) -> None:
-        lines = [f"GT 차체 간격 3~15m · {summary['frames_scored']}프레임 · 대상 {summary['eligible_gt_opportunities']}건"]
+        if summary.get("kind") == "weather_workflow":
+            lines = [f"날씨 {summary['weather_count']}종 · 세션 {summary['session_count']}개 · "
+                     f"평가 프레임 {summary['frames_scored']}개"]
+            for preset, weather in summary["weather_results"].items():
+                stats = weather["methods"]["radar_tracking_fusion"]
+                mae = f"{stats['mae_m']:.2f}m" if stats["mae_m"] is not None else "측정 없음"
+                lines.append(f"{preset}: 관측+예측 거리 {stats['distance_samples']}건 · MAE {mae}")
+            if summary["skipped_sessions"]:
+                lines.append(f"제외 세션 {len(summary['skipped_sessions'])}개 · 보고서에서 사유 확인")
+            lines.append(f"통합 요약 보고서: {summary['report_path']}")
+            lines.append(f"날씨별 상세 통합 보고서: {summary['detailed_report_path']}")
+            lines.append(f"날씨별 보고서: {Path(summary['report_path']).parent}")
+            self.evaluation_info.setText("\n".join(lines))
+            return
+        distance_filter = summary["distance_filter_m"]
+        high = distance_filter["max_m"]
+        range_label = (f"{distance_filter['min_inclusive']:g}m 이상"
+                       + (f" {high:g}m {'이하' if distance_filter['include_max'] else '미만'}"
+                          if high is not None else ""))
+        lines = [f"GT 차체 간격 {range_label} · {summary['frames_scored']}프레임 · 투영 GT {summary['eligible_gt_opportunities']}건(가림 미판정)"]
         for method, label in METHODS.items():
             result = summary["methods"][method]
             mae = f"{result['mae_m']:.2f}m" if result["mae_m"] is not None else "측정 없음"
-            lines.append(f"{label}: 거리 MAE {mae}, {result['distance_samples']}/{result['gt_opportunities']}건")
+            lines.append(f"{label}: 최종 거리 MAE {mae}, 관측 {result['observed_distance_samples']}건 + 예측 {result['predicted_distance_samples']}건 = 전체 {result['distance_samples']}건")
+        lines.append("거리 구간별 결과와 3~15m 전체 추적 기준 결과는 보고서에 포함됩니다.")
         lines.append(f"결과 보고서: {summary['report_path']}")
         lines.append(f"요약: {summary['summary_path']}")
         lines.append(f"상세 CSV: {summary['csv_path']}")
@@ -752,6 +1126,7 @@ class MonitorWindow(QMainWindow):
             self.yolo_config_info.setText(self.yolo_worker.status)
             if self.recorder.mode in ("yolo", "tracking", "radar_fusion"):
                 self.recorder.stop_session()
+                self._finish_recording_clock("YOLO 오류로 기록을 중지했습니다.")
                 self.yolo_worker.set_radar_fusion_enabled(self._radar_fusion_enabled_before_record)
                 self._set_checked(self.yolo_record_button, False)
                 self._set_checked(self.tracking_record_button, False)
@@ -964,6 +1339,11 @@ class MonitorWindow(QMainWindow):
         self.record_info.setText(record_summary + (f"\n{stats['error']}" if stats["error"] else ""))
 
     def closeEvent(self, event: Any) -> None:
+        if self._weather_workflow_dialog is not None:
+            self._weather_workflow_dialog.shutdown()
+        if self._traffic_light_thread is not None:
+            self._traffic_light_thread.wait()
+        self.recording_timer.stop()
         self.timer.stop()
         self.video_timer.stop()
         self.collector.on_camera_frame = None

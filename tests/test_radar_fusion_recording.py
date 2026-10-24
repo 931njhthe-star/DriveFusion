@@ -35,7 +35,7 @@ class RadarFusionRecordingTests(unittest.TestCase):
             stop = threading.Event()
             stop.set()
             recorder = SessionRecorder(session, "127.0.0.1", 2000, "hero")
-            recorder._run(session, records, Queue(), stop)
+            recorder._run(session, records, Queue(), Queue(), stop)
 
             written = [json.loads(line) for line in fusion_path.read_text(
                 encoding="utf-8"

@@ -8,7 +8,9 @@ import time
 
 from collector.live import DetectionFrame, LiveState, SessionRecorder
 from core.yolo11_detector import Detector
-from monitor.qt.positioning import PositioningEngine, match_radar_to_boxes
+from monitor.qt.positioning import (
+    PositioningEngine, match_radar_to_boxes, radar_tracking_points,
+)
 from monitor.qt.tracker import MultiObjectTracker
 
 
@@ -68,6 +70,37 @@ class YoloWorker:
     @property
     def tracking_enabled(self) -> bool:
         return self._tracking_enabled.is_set()
+
+    @property
+    def max_lost_frames(self) -> int:
+        with self._control_lock:
+            return self._tracker.max_lost_frames
+
+    @property
+    def radar_track_correction_enabled(self) -> bool:
+        with self._control_lock:
+            return self._tracker.radar_correction_enabled
+
+    def set_radar_track_correction_enabled(self, enabled: bool) -> None:
+        with self._control_lock:
+            if self._tracker.radar_correction_enabled == bool(enabled):
+                return
+            self._tracker.radar_correction_enabled = bool(enabled)
+            self._tracker.reset()
+            self._positioning.reset()
+            self.state.clear_detections()
+
+    def set_max_lost_frames(self, frames: int) -> None:
+        if isinstance(frames, bool) or not isinstance(frames, int) or not 0 <= frames <= 100:
+            raise ValueError("Tracking retention must be between 0 and 100 frames")
+        with self._control_lock:
+            if frames == self._tracker.max_lost_frames:
+                return
+            for tracker in (self._tracker, self._vision_tracker):
+                tracker.max_lost_frames = frames
+                tracker.reset()
+            self._positioning.reset()
+            self.state.clear_detections()
 
     def set_tracking_enabled(self, enabled: bool) -> None:
         with self._control_lock:
@@ -131,12 +164,21 @@ class YoloWorker:
                                 if self._radar_fusion_enabled.is_set()
                                 else None
                             )
+                            radar_points = (
+                                radar_tracking_points(frame, radar, truth)
+                                if (self._tracking_enabled.is_set()
+                                    and self._radar_fusion_enabled.is_set()
+                                    and self._tracker.radar_correction_enabled)
+                                else ()
+                            )
                             vision_tracks = ()
                             tracks = ()
                             if self._tracking_enabled.is_set():
                                 vision_tracks = self._vision_tracker.update(boxes, frame.received_at)
                                 tracks = (
-                                    self._tracker.update(boxes, frame.received_at, radar_matches)
+                                    self._tracker.update(
+                                        boxes, frame.received_at, radar_matches, radar_points
+                                    )
                                     if self._radar_fusion_enabled.is_set()
                                     else vision_tracks
                                 )

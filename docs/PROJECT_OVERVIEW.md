@@ -24,7 +24,7 @@ CARLA의 카메라·레이더 데이터를 외부 프로그램으로 수집하�
 | 개발·실행 OS | Windows 11, WSL2 Ubuntu 24.04 | Python Qt 앱은 Windows에서 구현. Linux Core 빌드는 미구현 |
 | GPU·입력 | RTX 4070 SUPER 12GB, RGB 640×480, 레이더 1대 | GPU 확인. 카메라·레이더 부착 구현 |
 | 처리 | C++17, OpenCV, CMake, MSVC/GCC | 외부 TensorRTx YOLO DLL과 Python 추적·레이더 처리·거리 융합·평가 구현. 독립 C++ Core와 루트 빌드 파일 미구현 |
-| 표시·저장 | Qt 6, FastAPI/WebSocket/React, 파일 후 SQLite 검토 | PySide6 Qt 비교 화면, JPEG/JSONL 기록, MP4 비교 영상, 3~15m 실험 보고서 구현. 웹·DB 미구현 |
+| 표시·저장 | Qt 6, FastAPI/WebSocket/React, 파일 후 SQLite 검토 | PySide6 Qt 비교 화면, JPEG/JSONL 기록, MP4 비교 영상, 거리 구간별 실험 보고서 구현. 웹·DB 미구현 |
 | 선택 기능 | LangGraph/LLM API | 필수 완료 기준에 포함하지 않음 |
 
 ### 현재 범위와 운영 원칙
@@ -64,7 +64,7 @@ carla/
 │  │  ├─ yolo_worker.py          실시간 YOLO 작업자
 │  │  ├─ tracker.py              영상·레이더 보조 추적
 │  │  ├─ positioning.py          카메라·레이더 위치 및 거리 추정
-│  │  ├─ experiment_evaluator.py 저장 세션의 3~15m 평가
+│  │  ├─ experiment_evaluator.py 저장 세션의 거리 구간별 평가
 │  │  └─ yolo_overlay_generator.py 저장 세션 비교 영상 생성
 │  └─ web/                       [비어 있음]
 ├─ radar_dsp/
@@ -99,7 +99,7 @@ CARLA 서버 + 지정 차량
             │    └─ MonitorWindow (Qt 비교 화면)
             └─ SessionRecorder (별도 기록 스레드) → JPEG + JSONL
                          ↓
-              저장 세션 평가 → 3~15m 보고서 / 비교 영상
+              저장 세션 평가 → 거리 구간별 보고서 / 비교 영상
 ```
 
 | 구성 요소 | 위치 | 책임 |
@@ -110,7 +110,7 @@ CARLA 서버 + 지정 차량
 | `YOLO11Detector`·작업자 | `core/yolo11_detector.py`, `monitor/qt/yolo_worker.py` | 별도 TensorRTx DLL로 검출하고 카메라 프레임·시각과 함께 결과 전달 |
 | 추적기 | `monitor/qt/tracker.py` | 영상 전용 및 레이더 보조 트랙 연결·ID 관리 |
 | 거리·위치 추정 | `monitor/qt/positioning.py` | 같은 프레임의 레이더 점 투영·군집화, 카메라 기본 거리와 조건부 레이더 거리 선택 |
-| 저장 세션 평가 | `monitor/qt/experiment_evaluator.py` | 세 방법의 3~15m 차체 간격을 CARLA GT와 비교하고 보고서 생성 |
+| 저장 세션 평가 | `monitor/qt/experiment_evaluator.py` | 세 방법의 거리 구간별 차체 간격을 CARLA GT와 비교하고 보고서 생성 |
 | 비교 영상 생성 | `monitor/qt/yolo_overlay_generator.py` | 저장 세션에서 원본·검출·추적·융합 2×2 영상 생성 |
 | `MonitorWindow` | `monitor/qt/app.py` | RGB 비교 화면, 레이더 플롯·표, 차량·IMU·GNSS 값, 이벤트·저장·실험 버튼 제공 |
 | `RadarPlot` | `monitor/qt/app.py` | 레이더 거리·방위각·상대속도를 2D로 표시 |
@@ -131,6 +131,14 @@ Windows에서 CARLA 0.9.16과 대상 차량을 먼저 실행한 뒤, 프로젝�
 
 앱 시작만으로 기록하지 않는다. 화면에서 일반 기록, YOLO 검출 기록, YOLO+트래킹 기록, YOLO+레이더 융합 기록 중 하나를 직접 시작한다. 세션 폴더에는 다음 파일이 들어간다.
 
+기록 시간 입력이 `0분 0초`이면 수동으로 중지할 때까지 기록한다. 양수로 지정하면 시작 후 남은 시간을 표시하고 만료 시 자동 중지하며, 도중에 중지 버튼을 눌러 종료할 수도 있다. 지정한 시간(초)은 `session.json`의 `planned_duration_seconds`에 기록한다. 시간 계산은 앱 실행 중의 경과 시간을 기준으로 한다.
+
+날씨 수집 워크플로 창에서는 날씨 단계의 순서와 단계별 기록 시간을 설정한다. 별도 CARLA 클라이언트에서 `world.set_weather()`를 호출하고 지정한 안정화 시간 이후 기존 기록 기능으로 단계마다 새 세션을 생성한다. `session.json`의 `weather_workflow`에 프리셋, 적용한 날씨 매개변수, 단계 번호, 워크플로 ID를 기록한다. pygame 창을 직접 조작하지 않으며, 시뮬레이션 동기화 설정·tick·맵은 바꾸지 않는다.
+
+모든 새 세션의 `session.json`에 기록 시작 시 관측한 날씨 매개변수를 `weather`로 저장한다. 워크플로 세션은 `workflow_<ID>/weather_<프리셋>/<세션>/` 아래 저장한다. 워크플로 상위 폴더를 선택해 평가하면 각 세션의 기존 거리 보고서와 함께 상위 `experiment_results/weather_<프리셋>/`에 날씨별 결과, 상위 `experiment_results/`에 통합 결과를 만든다. 통합 오차는 세션 경계를 유지한 관측 표본을 합쳐 계산한다. GT가 없는 일반·YOLO 단독 세션이나 불완전한 세션은 제외 사유를 보고서에 기록한다.
+
+상위 `experiment_results/`에는 요약 통합보고서 `report_weather_combined_*.md`와 날씨별 전체 분석 내용을 한 파일에 담은 `report_weather_detailed_*.md`를 함께 저장한다.
+
 | 경로 | 내용 |
 | --- | --- |
 | `session.json` | 생성 시각, CARLA 호스트·포트, 차량 역할, 저장 형식 |
@@ -143,15 +151,15 @@ Windows에서 CARLA 0.9.16과 대상 차량을 먼저 실행한 뒤, 프로젝�
 | `radar_fusion.jsonl` | 레이더 융합 기록에서 추출한 위치 추정값 전용 파일 |
 | `ground_truth.jsonl` | 위치 오차 평가와 트랙 확인용 CARLA 차량 위치 |
 | `accuracy_summary.json` | 기록 종료 시 생성되는 위치 정확도·센서 프레임 정렬 요약 |
-| `experiment_results/report_3m_15m.md` | 저장 세션의 세 방법별 차체 간격 MAE·RMSE와 표본 수 |
-| `experiment_results/summary_3m_15m.json` | 같은 실험의 기계 판독용 집계 |
-| `experiment_results/position_errors_3m_15m.csv` | 차량·프레임별 GT/추정 거리와 레이더 선택 근거 |
+| `experiment_results/report_distance_profile_*.md` | 선택 범위·거리 구간·3~15m의 YOLO 관측 또는 유지 트랙 예측 기준 최종 차체 간격 MAE·RMSE와 두 표본의 별도 집계 |
+| `experiment_results/summary_distance_profile_*.json` | 같은 실험의 기계 판독용 집계 |
+| `experiment_results/position_errors_distance_profile_*.csv` | 차량·프레임별 GT/추정 거리, 구간, 레이더 선택 근거 |
 
 측정 레코드는 공통적으로 `frame`, `simulation_timestamp`, `receive_timestamp`를 가진다. 센서 레코드에는 `sensor_id`가 있고, 카메라 이외의 센서 레코드에는 `sensor_transform`도 있다. 차량 레코드는 `vehicle_id`, 위치·회전·속도 벡터·km/h 속도를 포함한다. 레이더의 각 포인트는 `distance_m`, `azimuth_rad`, `altitude_rad`, `relative_velocity_mps`를 가진다. 두 각도는 저장 시 라디안이며 화면 표에서 도 단위로 변환한다.
 
 기록 대기열이 가득 차면 해당 데이터는 누락되고 화면에 누적 누락 수가 표시된다. 따라서 저장 파일이 모든 시뮬레이션 프레임을 포함한다고 가정하면 안 된다. 여러 센서 레코드의 대응 관계는 JSONL 줄 순서보다 `frame`과 시뮬레이션 시각으로 판단한다. 레이더 융합 기록은 같은 프레임에 대한 영상 전용 트랙과 레이더 보조 트랙을 모두 저장한다. 화면의 **저장 세션 전체 비교 영상 생성** 버튼은 `*_radar_fusion` 세션에서 원본·YOLO·영상 트래킹·레이더 융합 화면을 2×2 MP4로 만들며, `ffmpeg`가 PATH에 있어야 한다. 과거 융합 세션에 `vision_tracks.jsonl`이 없으면 저장한 검출 기록을 재생해 영상 전용 트래킹 기준선을 생성한다. 추가 오버레이는 `annotated/`, `tracked/`, `radar_fusion/` 폴더에 기록한다.
 
-**저장 세션 3~15m 실험 결과 생성** 버튼은 융합 세션의 카메라 트래킹·카메라/레이더 거리 선택·레이더 보조 트래킹을 같은 CARLA 프레임의 GT와 비교한다. GT는 두 차량의 회전 bounding box 외곽 사이 최단 평면 간격이며, GT 3m 이상 15m 이하인 표본만 평가한다. `accuracy_summary.json`의 기존 2차원 위치 오차와 이 실험의 **차체 간 거리 오차**는 서로 다른 지표다.
+**저장 세션/날씨 워크플로 결과 생성** 버튼은 융합 세션의 카메라 트래킹·카메라/레이더 거리 선택·레이더 보조 트래킹을 같은 CARLA 프레임의 GT와 비교한다. GT는 두 차량의 회전 bounding box 외곽 사이 최단 평면 간격이다. 전체 거리, 기본 구간 또는 사용자 지정 범위를 선택할 수 있고 3~15m 전체 추적 기준 집계도 항상 남긴다. 최종 거리 오차는 현재 프레임의 YOLO 검출과 GT가 연결된 관측 트랙 **또는** 이전 연결로 유지 중인 예측 트랙의 거리 표본을 차량·프레임당 한 번 사용한다. 관측·예측 MAE는 각각 별도로도 표시한다. 투영 GT 수는 가림 여부를 판정하지 않아 실제 검출률의 분모가 아니다. `accuracy_summary.json`의 기존 2차원 위치 오차와 이 실험의 **차체 간 거리 오차**는 서로 다른 지표다.
 
 ## 5. 단계별 진행 현황
 
@@ -188,8 +196,8 @@ Windows에서 CARLA 0.9.16과 대상 차량을 먼저 실행한 뒤, 프로젝�
 ### Phase 4 · 카메라·레이더 융합과 거리 평가 — Python/Qt 프로토타입 구현
 
 - Python/Qt에서는 카메라와 레이더를 CARLA 프레임 번호로 맞추고 센서 변환을 적용해 레이더 점을 YOLO 차량 상자에 연결한다. 영상 전용과 레이더 보조 트랙, 2차원 위치, 차체 간 거리를 기록하고 Live 화면에서 비교한다.
-- **거리 기준:** GT는 같은 프레임의 내 차·상대 차 회전 bounding box 사이 최단 평면 간격이다. 카메라 관측 지점부터 내 차 외곽까지의 간격을 기본으로 하고, 가까운 레이더 점 3개 이상이 모이며 편차가 0.5m 이하이고 카메라 거리와 1m 이내로 일치하며 시간적 이동 검사를 통과할 때 레이더 거리를 선택한다. 레이더를 쓸 수 없거나 불일치하면 카메라 값을 사용한다. 2차원 위치 가중 융합과 거리 선택은 별개다.
-- **평가 경로:** 저장 세션을 한 번에 재생해 영상 트래킹+카메라, 영상 트래킹+거리 융합, 레이더 보조 트래킹+거리 융합을 GT 3~15m 구간에서 비교한다. Markdown 보고서·JSON 집계·차량별 CSV와 2×2 비교 영상을 생성한다. CARLA 대상 차량 위치·크기·자세는 GT와 트랙 확인에만 쓰며 센서 기반 거리 추정에는 넣지 않는다.
+- **거리 기준:** GT는 같은 프레임의 내 차·상대 차 회전 bounding box 사이 최단 평면 간격이다. 카메라 관측 지점부터 내 차 외곽까지의 간격을 기본으로 하고, 가까운 레이더 점 3개 이상이 모이며 편차가 0.5m 이하이고 카메라 거리와 1m 이내로 일치하며 시간적 이동 검사를 통과할 때 레이더 거리를 선택한다. 레이더를 쓸 수 없거나 불일치하면 품질 검사를 통과한 카메라 값을 사용하고, 예측 박스의 거리 투영이 급변하거나 불안정하면 거리를 미산출로 둔다. 2차원 위치 가중 융합과 거리 선택은 별개다.
+- **평가 경로:** 저장 세션을 한 번에 재생해 영상 트래킹+카메라, 영상 트래킹+거리 융합, 레이더 보조 트래킹+거리 융합을 GT 거리 구간별로 비교한다. 현재 YOLO 관측 또는 유지 트랙 예측의 거리 오차를 최종 지표로 합산하고 각각의 오차도 별도로 표시한다. 3~15m 전체 추적 기준 수치도 유지한다. Markdown 보고서·JSON 집계·차량별 CSV와 2×2 비교 영상을 생성한다. CARLA 대상 차량 위치·크기·자세는 GT와 트랙 확인에만 쓰며 센서 기반 거리 추정에는 넣지 않는다.
 - **현재 결과:** 2026-10-21 Town02 융합 세션의 공통 표본 254건에서 카메라 거리 MAE/RMSE는 0.952/1.210m, 조건부 레이더 선택은 0.917/1.199m였다. 레이더 최종 선택은 47건이었다. 두 융합 트래킹 방식의 거리 수치는 이 세션에서 같았다. 규칙 탐색에 쓴 세션을 다시 평가한 값이므로 독립 검증이나 추적 개선의 증거로 해석하지 않는다. 상세 표와 한계는 [차량 간 거리 추정과 평가 기록](DISTANCE_ESTIMATION.md)에 있다.
 - **남은 원 기획:** 센서 융합을 독립 C++ Core로 이관하고, 근접·접근 이벤트 검출과 속도 오차·ID 전환·지연 평가를 추가한다. CARLA 충돌·차선 이탈 센서 이벤트 표시는 현재 구현돼 있지만 융합 결과에서 새 위험 이벤트를 판단하지는 않는다. 별도 주행 세션의 독립 검증도 필요하다.
 

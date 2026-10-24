@@ -17,6 +17,18 @@ import carla
 from PySide6.QtGui import QImage
 
 
+WEATHER_FIELDS = (
+    "cloudiness", "precipitation", "precipitation_deposits", "wetness",
+    "wind_intensity", "fog_density", "fog_distance", "fog_falloff",
+    "sun_azimuth_angle", "sun_altitude_angle", "scattering_intensity",
+    "mie_scattering_scale", "rayleigh_scattering_scale", "dust_storm",
+)
+
+
+def weather_parameters(weather: carla.WeatherParameters) -> dict[str, float]:
+    return {name: float(getattr(weather, name)) for name in WEATHER_FIELDS}
+
+
 @dataclass(frozen=True)
 class CameraFrame:
     frame: int
@@ -28,6 +40,17 @@ class CameraFrame:
     sensor_id: int = 0
     fov: float = 90.0
     sensor_transform: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class VisibilityMaskFrame:
+    frame: int
+    timestamp: float
+    received_at: float
+    width: int
+    height: int
+    bgra: bytes
+    sensor_id: int
 
 
 @dataclass(frozen=True)
@@ -67,6 +90,7 @@ class LiveState:
         self.imu: dict[str, Any] | None = None
         self.gnss: dict[str, Any] | None = None
         self.positioning: dict[str, Any] | None = None
+        self.weather: dict[str, Any] | None = None
         self._radar_by_frame: dict[int, dict[str, Any]] = {}
         self._ground_truth_by_frame: dict[int, dict[str, Any]] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=12)
@@ -90,6 +114,7 @@ class LiveState:
             self.imu = None
             self.gnss = None
             self.positioning = None
+            self.weather = None
             self._radar_by_frame.clear()
             self._ground_truth_by_frame.clear()
             self.events.clear()
@@ -112,6 +137,10 @@ class LiveState:
                     self._ground_truth_by_frame[int(value["frame"])] = value
                     self._trim_history(self._ground_truth_by_frame)
                     self._sensor_ready.notify_all()
+
+    def set_weather(self, value: dict[str, Any]) -> None:
+        with self._lock:
+            self.weather = value
 
     @staticmethod
     def _trim_history(history: dict[int, dict[str, Any]], limit: int = 256) -> None:
@@ -173,6 +202,7 @@ class LiveState:
                 "imu": self.imu,
                 "gnss": self.gnss,
                 "positioning": self.positioning,
+                "weather": self.weather,
                 "ground_truth": self._ground_truth_by_frame[max(self._ground_truth_by_frame)]
                 if self._ground_truth_by_frame else None,
                 "events": list(self.events),
@@ -194,6 +224,7 @@ class SessionRecorder:
         self._last_mode: str | None = None
         self._records: Queue[dict[str, Any]] | None = None
         self._images: Queue[tuple[CameraFrame, int]] | None = None
+        self._visibility_masks: Queue[VisibilityMaskFrame] | None = None
         self._stop: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._enabled = False
@@ -211,16 +242,42 @@ class SessionRecorder:
         with self._lock:
             return self._mode
 
-    def start_session(self, mode: str, yolo_engine: Path | None = None) -> Path:
+    def start_session(self, mode: str, yolo_engine: Path | None = None,
+                      planned_duration_seconds: int | None = None,
+                      weather_workflow: dict[str, Any] | None = None,
+                      weather: dict[str, Any] | None = None,
+                      tracking_max_lost_frames: int = 10,
+                       radar_track_correction_enabled: bool | None = None,
+                       traffic_lights: dict[str, Any] | None = None) -> Path:
         if mode not in ("standard", "yolo", "tracking", "radar_fusion"):
             raise ValueError(f"Unknown recording mode: {mode}")
+        if planned_duration_seconds is not None and planned_duration_seconds <= 0:
+            raise ValueError("Planned recording duration must be positive")
+        if (isinstance(tracking_max_lost_frames, bool)
+                or not isinstance(tracking_max_lost_frames, int)
+                or not 0 <= tracking_max_lost_frames <= 100):
+            raise ValueError("Tracking retention must be between 0 and 100 frames")
+        if (radar_track_correction_enabled is not None
+                and not isinstance(radar_track_correction_enabled, bool)):
+            raise ValueError("Radar track correction must be a boolean")
+        if weather_workflow is not None:
+            import re
+            if (not re.fullmatch(r"[A-Za-z0-9_-]+", str(weather_workflow.get("workflow_id", "")))
+                    or not re.fullmatch(r"[A-Za-z0-9_-]+", str(weather_workflow.get("weather_preset", "")))):
+                raise ValueError("Invalid weather workflow path")
         with self._lock:
             if self._enabled:
                 raise RuntimeError("A recording session is already active")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            path = self.root / f"{timestamp}_{mode}"
+            parent = self.root
+            if weather_workflow is not None:
+                parent = (parent / f"workflow_{weather_workflow['workflow_id']}"
+                          / f"weather_{weather_workflow['weather_preset']}")
+                parent.mkdir(parents=True, exist_ok=True)
+            path = parent / f"{timestamp}_{mode}"
             path.mkdir(parents=True, exist_ok=False)
             (path / "camera").mkdir()
+            (path / "visibility_masks").mkdir()
             if mode in ("yolo", "tracking", "radar_fusion"):
                 (path / "detections.jsonl").touch()
             if mode in ("tracking", "radar_fusion"):
@@ -236,12 +293,29 @@ class SessionRecorder:
                 "carla_port": self.port,
                 "vehicle_role": self.role,
                 "recording_mode": mode,
+                "weather": weather,
+                "traffic_lights": traffic_lights,
                 "camera_format": "JPEG",
                 "measurements_format": "JSONL",
+                "visibility_mask": {
+                    "sensor": "sensor.camera.instance_segmentation",
+                    "format": "PNG (raw semantic and instance channels)",
+                    "index": "visibility_masks.jsonl",
+                    "frame_alignment": "same CARLA frame as RGB camera",
+                    "instance_id": "CARLA 0.9.16 actor ID, G low byte, B high byte",
+                },
             }
+            if planned_duration_seconds is not None:
+                metadata["planned_duration_seconds"] = planned_duration_seconds
+            if weather_workflow is not None:
+                metadata["weather_workflow"] = weather_workflow
             if mode in ("yolo", "tracking", "radar_fusion"):
                 metadata["yolo_engine"] = str(yolo_engine) if yolo_engine else None
             if mode in ("tracking", "radar_fusion"):
+                metadata["tracking_max_lost_frames"] = tracking_max_lost_frames
+                metadata["radar_track_correction_enabled"] = (
+                    mode == "radar_fusion"
+                    and radar_track_correction_enabled is True)
                 metadata["position_estimation"] = {
                     "camera_model": "pinhole projection to local flat ground plane",
                     "radar_association": "project radar returns into camera image and match to detection boxes",
@@ -264,15 +338,18 @@ class SessionRecorder:
             )
             records: Queue[dict[str, Any]] = Queue(maxsize=4096)
             images: Queue[tuple[CameraFrame, int]] = Queue(maxsize=32)
+            visibility_masks: Queue[VisibilityMaskFrame] = Queue(maxsize=32)
             stop = threading.Event()
             thread = threading.Thread(
-                target=self._run, args=(path, records, images, stop), name="session-recorder"
+                target=self._run, args=(path, records, images, visibility_masks, stop),
+                name="session-recorder"
             )
             self.path = path
             self._mode = mode
             self._last_mode = mode
             self._records = records
             self._images = images
+            self._visibility_masks = visibility_masks
             self._stop = stop
             self._thread = thread
             self._saved_frames = 0
@@ -327,6 +404,15 @@ class SessionRecorder:
             except Full:
                 self._dropped_frames += 1
 
+    def record_visibility_mask(self, frame: VisibilityMaskFrame) -> None:
+        with self._lock:
+            if not self._enabled or self._visibility_masks is None:
+                return
+            try:
+                self._visibility_masks.put_nowait(frame)
+            except Full:
+                self._dropped_frames += 1
+
     def record_detection(self, detection: DetectionFrame) -> None:
         frame = detection.camera
         records = [{
@@ -372,6 +458,8 @@ class SessionRecorder:
                     "class_id": track.class_id,
                     "confidence": track.confidence,
                     "predicted": track.predicted,
+                    "radar_corrected": track.radar_corrected,
+                    "radar_correction_points": track.radar_correction_points,
                     "missed_frames": track.missed_frames,
                     "hits": track.hits,
                     "velocity_x_px_s": track.velocity_x_px_s,
@@ -417,12 +505,14 @@ class SessionRecorder:
         session_path: Path,
         records: Queue[dict[str, Any]],
         images: Queue[tuple[CameraFrame, int]],
+        visibility_masks: Queue[VisibilityMaskFrame],
         stop: threading.Event,
     ) -> None:
         outputs: dict[str, Any] = {}
         try:
             with (session_path / "measurements.jsonl").open("a", encoding="utf-8") as output:
-                while not stop.is_set() or not records.empty() or not images.empty():
+                while (not stop.is_set() or not records.empty() or not images.empty()
+                       or not visibility_masks.empty()):
                     wrote = False
                     for _ in range(20):
                         try:
@@ -483,6 +573,37 @@ class SessionRecorder:
                                 self._dropped_frames += 1
                                 self._error = "JPEG 저장 실패"
                         wrote = True
+                    try:
+                        mask = visibility_masks.get_nowait()
+                    except Empty:
+                        pass
+                    else:
+                        relative_path = (f"visibility_masks/"
+                                         f"{mask.sensor_id}_{mask.frame:08d}.png")
+                        mask_image = QImage(
+                            mask.bgra, mask.width, mask.height, mask.width * 4,
+                            QImage.Format.Format_ARGB32,
+                        )
+                        if mask_image.save(str(session_path / relative_path), "PNG"):
+                            if "visibility_masks.jsonl" not in outputs:
+                                outputs["visibility_masks.jsonl"] = (
+                                    session_path / "visibility_masks.jsonl"
+                                ).open("a", encoding="utf-8")
+                            outputs["visibility_masks.jsonl"].write(json.dumps({
+                                "kind": "visibility_mask",
+                                "sensor_id": mask.sensor_id,
+                                "frame": mask.frame,
+                                "simulation_timestamp": mask.timestamp,
+                                "receive_timestamp": mask.received_at,
+                                "width": mask.width,
+                                "height": mask.height,
+                                "image": relative_path,
+                            }) + "\n")
+                        else:
+                            with self._lock:
+                                self._dropped_frames += 1
+                                self._error = "가시성 마스크 PNG 저장 실패"
+                        wrote = True
                     if wrote:
                         output.flush()
                         for handle in outputs.values():
@@ -515,6 +636,7 @@ class SessionRecorder:
                 self._stop = None
                 self._records = None
                 self._images = None
+                self._visibility_masks = None
                 self._mode = None
         if mode in ("tracking", "radar_fusion") and path is not None:
             try:
@@ -586,6 +708,12 @@ class CarlaCollector:
                 carla.Transform(carla.Location(x=1.5, z=2.4)),
                 {"image_size_x": "640", "image_size_y": "480", "fov": "90", "sensor_tick": sensor_tick},
                 self._on_camera,
+            ),
+            (
+                "sensor.camera.instance_segmentation",
+                carla.Transform(carla.Location(x=1.5, z=2.4)),
+                {"image_size_x": "640", "image_size_y": "480", "fov": "90", "sensor_tick": sensor_tick},
+                self._on_visibility_mask,
             ),
             (
                 "sensor.other.radar",
@@ -660,6 +788,19 @@ class CarlaCollector:
         self.recorder.record_camera(frame, sensor_id)
         if self.on_camera_frame is not None:
             self.on_camera_frame()
+
+    def _on_visibility_mask(self, image: carla.Image, sensor_id: int) -> None:
+        if not self.recorder.is_enabled():
+            return
+        self.recorder.record_visibility_mask(VisibilityMaskFrame(
+            frame=int(image.frame),
+            timestamp=float(image.timestamp),
+            received_at=time.time(),
+            width=int(image.width),
+            height=int(image.height),
+            bgra=bytes(image.raw_data),
+            sensor_id=sensor_id,
+        ))
 
     def _on_radar(self, measurement: carla.RadarMeasurement, sensor_id: int) -> None:
         data = self._base("radar", measurement, sensor_id)
@@ -814,6 +955,7 @@ class CarlaCollector:
                 client = carla.Client(self.host, self.port)
                 client.set_timeout(3.0)
                 world = client.get_world()
+                self.state.set_weather(weather_parameters(world.get_weather()))
                 vehicles = world.get_actors().filter("vehicle.*")
                 vehicle = next((v for v in vehicles if v.attributes.get("role_name") == self.role), None)
                 if vehicle is None:
@@ -837,6 +979,7 @@ class CarlaCollector:
                         last_frame = snapshot.frame
                     if time.monotonic() - last_actor_refresh >= 1.0:
                         self._refresh_vehicle_metadata(world)
+                        self.state.set_weather(weather_parameters(world.get_weather()))
                         last_actor_refresh = time.monotonic()
                     self._stop.wait(0.03)
             except Exception as exc:

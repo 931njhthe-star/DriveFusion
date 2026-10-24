@@ -32,7 +32,7 @@ def _transform(x: float = 0.0, y: float = 0.0, z: float = 0.0,
 
 
 class PositioningTests(unittest.TestCase):
-    def test_camera_radar_imu_gnss_spawn_together_at_fifteen_fps(self) -> None:
+    def test_rgb_mask_radar_imu_gnss_spawn_together_at_fifteen_fps(self) -> None:
         collector = CarlaCollector(LiveState(), SessionRecorder(
             Path("unused"), "127.0.0.1", 2000, "hero"
         ))
@@ -44,19 +44,24 @@ class PositioningTests(unittest.TestCase):
         )
         world.get_actor.side_effect = lambda _actor_id: MagicMock()
         client.apply_batch_sync.return_value = [
-            SimpleNamespace(actor_id=actor_id, error="") for actor_id in range(10, 14)
+            SimpleNamespace(actor_id=actor_id, error="") for actor_id in range(10, 15)
         ]
         collector._spawn_sensor = MagicMock()
 
         with patch("collector.live.carla.command.SpawnActor", side_effect=lambda *args: args):
             collector._attach_sensors(client, world, SimpleNamespace(id=7))
 
-        self.assertEqual(len(client.apply_batch_sync.call_args.args[0]), 4)
+        self.assertEqual(len(client.apply_batch_sync.call_args.args[0]), 5)
         self.assertIs(client.apply_batch_sync.call_args.args[1], False)
-        for name in ("sensor.camera.rgb", "sensor.other.radar",
+        for name in ("sensor.camera.rgb", "sensor.camera.instance_segmentation",
+                     "sensor.other.radar",
                      "sensor.other.imu", "sensor.other.gnss"):
             attributes = dict(call.args for call in blueprints[name].set_attribute.call_args_list)
             self.assertEqual(attributes["sensor_tick"], "0.066666")
+        for name in ("sensor.camera.rgb", "sensor.camera.instance_segmentation"):
+            attributes = dict(call.args for call in blueprints[name].set_attribute.call_args_list)
+            self.assertEqual((attributes["image_size_x"], attributes["image_size_y"],
+                              attributes["fov"]), ("640", "480", "90"))
 
     def test_sensor_context_requires_exact_camera_frame(self) -> None:
         state = LiveState()
@@ -214,6 +219,56 @@ class PositioningTests(unittest.TestCase):
 
         self.assertEqual(match_radar_to_boxes(camera, [box], radar, truth), (None,))
 
+    def test_predicted_distance_jump_is_rejected_without_deleting_track(self) -> None:
+        engine = PositioningEngine()
+        ego = {"actor_id": 1, "transform": _transform(), "bounding_box": {
+            "location": {"x": 0.0, "y": 0.0, "z": 0.75},
+            "extent": {"x": 0.5, "y": 0.5, "z": 0.75}}}
+        truth = {"frame": 100, "ego_actor_id": 1, "ego_transform": _transform(),
+                 "ego_ground_z": 0.0, "vehicles": [ego]}
+
+        def estimate(frame: int, bottom: int, predicted: bool) -> dict:
+            truth["frame"] = frame
+            camera = SimpleNamespace(frame=frame, timestamp=5.0 + (frame - 100) / 15.0,
+                                     width=640, height=480, fov=90.0,
+                                     sensor_transform=_transform(z=2.4))
+            track = SimpleNamespace(track_id=7, class_id=2, x=285, y=230,
+                                    width=70, height=bottom - 230,
+                                    detection_index=None if predicted else 0,
+                                    predicted=predicted, missed_frames=frame - 100)
+            return engine.estimate(camera, (track,), (track,), None, truth, None, 0)["objects"][0]
+
+        observed = estimate(100, 260, False)
+        accepted = estimate(101, 259, True)
+        rejected = estimate(102, 250, True)
+        self.assertIsNotNone(observed["estimated_distance_m"])
+        self.assertIsNotNone(accepted["estimated_distance_m"])
+        self.assertEqual(rejected["track_id"], 7)
+        self.assertIsNone(rejected["estimated_distance_m"])
+        self.assertIsNotNone(rejected["raw_camera_distance_m"])
+        self.assertEqual(rejected["distance_rejection_reason"], "prediction_position_jump")
+
+    def test_near_horizon_predicted_distance_is_rejected_as_unstable(self) -> None:
+        engine = PositioningEngine()
+        ego = {"actor_id": 1, "transform": _transform(), "bounding_box": {
+            "location": {"x": 0.0, "y": 0.0, "z": 0.75},
+            "extent": {"x": 0.5, "y": 0.5, "z": 0.75}}}
+        truth = {"frame": 100, "ego_actor_id": 1, "ego_transform": _transform(),
+                 "ego_ground_z": 0.0, "vehicles": [ego]}
+        for frame, predicted in ((100, False), (101, True)):
+            truth["frame"] = frame
+            camera = SimpleNamespace(frame=frame, timestamp=5.0 + (frame - 100) / 15.0,
+                                     width=640, height=480, fov=90.0,
+                                     sensor_transform=_transform(z=2.4))
+            track = SimpleNamespace(track_id=7, class_id=2, x=285, y=230,
+                                    width=70, height=19,
+                                    detection_index=None if predicted else 0,
+                                    predicted=predicted, missed_frames=int(predicted))
+            result = engine.estimate(camera, (track,), (track,), None, truth, None, 0)["objects"][0]
+        self.assertIsNone(result["estimated_distance_m"])
+        self.assertEqual(result["distance_rejection_reason"],
+                         "prediction_projection_unstable")
+
     def test_single_radar_point_has_low_weight_and_large_jump_falls_back(self) -> None:
         engine = PositioningEngine()
         truth = {"ego_transform": _transform(), "ego_ground_z": 0.0,
@@ -359,19 +414,32 @@ class RadarTrackingTests(unittest.TestCase):
         tracker = MultiObjectTracker()
         initial = [Box(100, 100, 40, 40, 2, 0.9), Box(100, 100, 40, 40, 2, 0.9)]
         tracker.update(initial, 1.0, [
-            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 1),
-            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 1),
+            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 3),
+            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 3),
         ])
 
         tracks = tracker.update(initial, 1.05, [
-            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 1),
-            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 1),
+            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 3),
+            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 3),
         ])
 
         by_id = {track.track_id: track for track in tracks}
         self.assertEqual(by_id[1].detection_index, 1)
         self.assertEqual(by_id[2].detection_index, 0)
         self.assertAlmostEqual(by_id[1].radar_range_m or 0.0, 10.0)
+
+    def test_sparse_radar_does_not_override_ambiguous_image_match(self) -> None:
+        tracker = MultiObjectTracker()
+        boxes = [Box(100, 100, 40, 40, 2, 0.9)] * 2
+        tracker.update(boxes, 1.0, [
+            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 1),
+            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 1),
+        ])
+        tracks = tracker.update(boxes, 1.05, [
+            RadarBoxMatch(20.0, 0.0, 20.0, 0.0, 1),
+            RadarBoxMatch(10.0, 0.0, 10.0, 0.0, 1),
+        ])
+        self.assertEqual([track.detection_index for track in tracks], [0, 1])
 
 
 class RecorderQueueTests(unittest.TestCase):

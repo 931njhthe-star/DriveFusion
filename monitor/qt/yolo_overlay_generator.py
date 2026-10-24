@@ -156,6 +156,8 @@ def _draw_radar_fusion(image: QImage, tracks: Any, positioning: dict[str, Any]) 
             label += "  radar wait"
         if track.get("predicted"):
             label += f"  lost {track.get('missed_frames', 0)}"
+            if track.get("radar_corrected"):
+                label += "  radar corrected"
         painter.drawText(x, max(14, y - 4), label)
     painter.end()
 
@@ -258,7 +260,11 @@ def _vision_tracking_records(
             item[0][1],
         ),
     )
-    tracker = MultiObjectTracker(max_lost_frames=10)
+    max_lost_frames = metadata.get("tracking_max_lost_frames", 10)
+    if (isinstance(max_lost_frames, bool) or not isinstance(max_lost_frames, int)
+            or not 0 <= max_lost_frames <= 100):
+        max_lost_frames = 10
+    tracker = MultiObjectTracker(max_lost_frames=max_lost_frames)
     current_sensor_id: int | None = None
     have_sensor_id = False
     reconstructed: dict[tuple[int | None, int], dict[str, Any]] = {}

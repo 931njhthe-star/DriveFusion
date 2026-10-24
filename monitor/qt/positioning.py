@@ -19,6 +19,10 @@ class RadarBoxMatch:
     point_count: int
     range_spread_m: float = 0.0
     points_ego_xy: tuple[tuple[float, float], ...] = ()
+    world_x_m: float | None = None
+    world_y_m: float | None = None
+    u_px: float | None = None
+    v_px: float | None = None
 
 
 RADAR_CAMERA_GATE_M = 3.0
@@ -29,6 +33,9 @@ POSITION_JUMP_ALLOWANCE_M = 3.0
 RADAR_DISTANCE_AGREEMENT_M = 1.0
 MIN_DISTANCE_RADAR_POINTS = 3
 MAX_DISTANCE_CLUSTER_SPREAD_M = 0.5
+PREDICTED_ANCHOR_MAX_AGE_S = 1.0
+PREDICTED_PIXEL_DISTANCE_ALLOWANCE_M = 3.0
+PREDICTED_PIXEL_DISTANCE_ALLOWANCE_RATIO = 0.10
 
 
 def _vec(value: dict[str, float]) -> tuple[float, float, float]:
@@ -200,7 +207,8 @@ def _ego_ground_z(ground_truth: dict[str, Any] | None) -> float | None:
 
 
 def _camera_ground_position(
-    box: Any, camera: Any, ground_truth: dict[str, Any] | None
+    box: Any, camera: Any, ground_truth: dict[str, Any] | None,
+    bottom_offset_px: float = 0.0,
 ) -> tuple[float, float] | None:
     if not camera.sensor_transform or not ground_truth or not ground_truth.get("ego_transform"):
         return None
@@ -209,7 +217,7 @@ def _camera_ground_position(
         return None
     fx, fy, cx, cy = _intrinsics(camera)
     u = float(box.x) + float(box.width) / 2.0
-    v = float(box.y) + float(box.height)
+    v = float(box.y) + float(box.height) + bottom_offset_px
     local_ray = (1.0, (u - cx) / fx, -(v - cy) / fy)
     direction = _rotate_local_to_world(local_ray, camera.sensor_transform["rotation"])
     if abs(direction[2]) < 1e-5:
@@ -246,14 +254,30 @@ def _radar_points_in_camera(
         pixel = _world_to_pixel(world_point, camera)
         if pixel is None:
             continue
+        ground_z = _ego_ground_z(ground_truth)
+        ground_pixel = (_world_to_pixel((world_point[0], world_point[1], ground_z), camera)
+                        if ground_z is not None else None)
         ego_point = _to_local(world_point, ego_transform)
         output.append({
             "u": pixel[0], "v": pixel[1], "camera_depth_m": pixel[2],
+            "ground_u": ground_pixel[0] if ground_pixel else None,
+            "ground_v": ground_pixel[1] if ground_pixel else None,
             "x_ego_m": ego_point[0], "y_ego_m": ego_point[1],
+            "world_x_m": world_point[0], "world_y_m": world_point[1],
             "range_m": math.hypot(ego_point[0], ego_point[1]),
             "range_rate_mps": -float(point["relative_velocity_mps"]),
         })
     return output
+
+
+def radar_tracking_points(
+    camera: Any, radar: dict[str, Any] | None, ground_truth: dict[str, Any] | None,
+) -> tuple[dict[str, float], ...]:
+    """Return same-frame radar points in image and world coordinates, without target GT."""
+    if radar is None or int(radar["frame"]) != int(camera.frame):
+        return ()
+    return tuple(point for point in _radar_points_in_camera(camera, radar, ground_truth)
+                 if point["ground_u"] is not None and point["ground_v"] is not None)
 
 
 def match_radar_to_boxes(
@@ -320,6 +344,12 @@ def match_radar_to_boxes(
             range_spread_m=max(abs(point["range_m"] - center_range) for point in cluster),
             points_ego_xy=tuple((point["x_ego_m"], point["y_ego_m"])
                                 for point in cluster),
+            world_x_m=median(point["world_x_m"] for point in cluster),
+            world_y_m=median(point["world_y_m"] for point in cluster),
+            u_px=(median(point["ground_u"] for point in cluster)
+                  if all(point["ground_u"] is not None for point in cluster) else None),
+            v_px=(median(point["ground_v"] for point in cluster)
+                  if all(point["ground_v"] is not None for point in cluster) else None),
         ))
     return tuple(matches)
 
@@ -444,11 +474,15 @@ class PositioningEngine:
     def __init__(self) -> None:
         self._track_actor_ids: dict[int, int] = {}
         self._last_positions: dict[int, tuple[float, tuple[float, float]]] = {}
+        self._last_observed_camera_world: dict[int, tuple[float, tuple[float, float]]] = {}
+        self._track_radar_offsets_world: dict[int, tuple[float, float]] = {}
         self.accuracy = PositionAccuracyAccumulator()
 
     def reset(self) -> None:
         self._track_actor_ids.clear()
         self._last_positions.clear()
+        self._last_observed_camera_world.clear()
+        self._track_radar_offsets_world.clear()
         self.accuracy = PositionAccuracyAccumulator()
 
     def estimate(
@@ -472,6 +506,53 @@ class PositioningEngine:
                    if track.detection_index is not None and track.detection_index < len(boxes)
                    else track)
             camera_xy = _camera_ground_position(box, camera, truth)
+            raw_camera_distance = (_point_to_ego_distance(camera_xy, ego_footprint)
+                                   if camera_xy is not None and ego_footprint is not None else None)
+            prediction_rejection = None
+            prediction_jump_m = None
+            prediction_jump_limit_m = None
+            prediction_pixel_sensitivity_m = None
+            if track.predicted:
+                if camera_xy is None or ego_transform is None or ego_footprint is None:
+                    prediction_rejection = "prediction_projection_unavailable"
+                else:
+                    anchor = self._last_observed_camera_world.get(track.track_id)
+                    if anchor is None:
+                        prediction_rejection = "prediction_anchor_missing"
+                    else:
+                        elapsed = timestamp - anchor[0]
+                        if elapsed <= 0.0 or elapsed > PREDICTED_ANCHOR_MAX_AGE_S:
+                            prediction_rejection = "prediction_anchor_stale"
+                        else:
+                            candidate_world = _to_world(
+                                (camera_xy[0], camera_xy[1], 0.0), ego_transform
+                            )
+                            prediction_jump_m = math.dist(candidate_world[:2], anchor[1])
+                            prediction_jump_limit_m = (
+                                POSITION_JUMP_ALLOWANCE_M + MAX_TARGET_SPEED_MPS * elapsed
+                            )
+                            if prediction_jump_m > prediction_jump_limit_m:
+                                prediction_rejection = "prediction_position_jump"
+                    if prediction_rejection is None:
+                        shifted = (
+                            _camera_ground_position(box, camera, truth, -1.0),
+                            _camera_ground_position(box, camera, truth, 1.0),
+                        )
+                        if any(point is None for point in shifted):
+                            prediction_rejection = "prediction_projection_unstable"
+                        else:
+                            prediction_pixel_sensitivity_m = max(
+                                abs(_point_to_ego_distance(point, ego_footprint)
+                                    - raw_camera_distance)
+                                for point in shifted
+                            )
+                            if prediction_pixel_sensitivity_m > max(
+                                PREDICTED_PIXEL_DISTANCE_ALLOWANCE_M,
+                                PREDICTED_PIXEL_DISTANCE_ALLOWANCE_RATIO * raw_camera_distance,
+                            ):
+                                prediction_rejection = "prediction_projection_unstable"
+                if prediction_rejection is not None:
+                    camera_xy = None
             radar_match = (
                 radar_by_box[track.detection_index]
                 if track.detection_index is not None and track.detection_index < len(radar_by_box)
@@ -486,23 +567,55 @@ class PositioningEngine:
             radar_point_count = int(radar_match.point_count) if radar_match else 0
             radar_age = 0.0 if radar_match else None
             radar_rejection_reason = None
+            radar_target_xy = radar_xy
+            if radar_xy is not None and ego_transform is not None:
+                if track.predicted and getattr(track, "radar_corrected", False):
+                    offset = self._track_radar_offsets_world.get(track.track_id)
+                    if offset is not None:
+                        radar_world = _to_world((radar_xy[0], radar_xy[1], 0.0), ego_transform)
+                        target_local = _to_local(
+                            (radar_world[0] + offset[0], radar_world[1] + offset[1],
+                             radar_world[2]), ego_transform,
+                        )
+                        radar_target_xy = target_local[:2]
+                    else:
+                        radar_target_xy = None
             previous = self._last_positions.get(track.track_id)
-            if radar_xy is not None and previous is not None and ego_transform is not None:
+            if radar_target_xy is not None and previous is not None and ego_transform is not None:
                 elapsed = timestamp - previous[0]
                 if 0.0 < elapsed <= 1.0:
-                    radar_world = _to_world((radar_xy[0], radar_xy[1], 0.0), ego_transform)
+                    radar_world = _to_world(
+                        (radar_target_xy[0], radar_target_xy[1], 0.0), ego_transform
+                    )
                     jump = math.dist(radar_world[:2], previous[1])
                     if jump > POSITION_JUMP_ALLOWANCE_M + MAX_TARGET_SPEED_MPS * elapsed:
                         radar_xy = None
+                        radar_target_xy = None
                         radar_rejection_reason = "implausible_position_jump"
+            if (not track.predicted and camera_xy is not None and radar_xy is not None
+                    and radar_point_count >= MIN_DISTANCE_RADAR_POINTS
+                    and radar_match.range_spread_m <= MAX_DISTANCE_CLUSTER_SPREAD_M
+                    and ego_transform is not None):
+                camera_world = _to_world((camera_xy[0], camera_xy[1], 0.0), ego_transform)
+                radar_world = _to_world((radar_xy[0], radar_xy[1], 0.0), ego_transform)
+                measured_offset = (camera_world[0] - radar_world[0],
+                                   camera_world[1] - radar_world[1])
+                if math.hypot(*measured_offset) <= 5.0:
+                    previous_offset = self._track_radar_offsets_world.get(track.track_id)
+                    self._track_radar_offsets_world[track.track_id] = (
+                        measured_offset if previous_offset is None else
+                        (0.7 * previous_offset[0] + 0.3 * measured_offset[0],
+                         0.7 * previous_offset[1] + 0.3 * measured_offset[1])
+                    )
             fused_xy = None
-            if camera_xy is not None and radar_xy is not None:
+            if camera_xy is not None and radar_target_xy is not None:
                 radar_weight = (SINGLE_POINT_RADAR_WEIGHT if radar_point_count == 1
                                 else MULTI_POINT_RADAR_WEIGHT)
-                fused_xy = ((1.0 - radar_weight) * camera_xy[0] + radar_weight * radar_xy[0],
-                            0.65 * camera_xy[1] + 0.35 * radar_xy[1])
-            elif radar_xy is not None:
-                fused_xy = radar_xy
+                fused_xy = ((1.0 - radar_weight) * camera_xy[0]
+                            + radar_weight * radar_target_xy[0],
+                            0.65 * camera_xy[1] + 0.35 * radar_target_xy[1])
+            elif radar_target_xy is not None:
+                fused_xy = radar_target_xy
             elif camera_xy is not None:
                 fused_xy = camera_xy
             camera_distance = (_point_to_ego_distance(camera_xy, ego_footprint)
@@ -512,7 +625,7 @@ class PositioningEngine:
                               if radar_xy is not None and ego_footprint is not None
                               and radar_match.points_ego_xy else None)
             distance_source = "camera" if camera_distance is not None else "unavailable"
-            distance_rejection_reason = radar_rejection_reason
+            distance_rejection_reason = prediction_rejection or radar_rejection_reason
             estimated_distance = camera_distance
             if radar_distance is not None and camera_distance is not None:
                 if radar_point_count < MIN_DISTANCE_RADAR_POINTS:
@@ -528,6 +641,11 @@ class PositioningEngine:
             if fused_xy is not None and ego_transform is not None and not track.predicted:
                 fused_world = _to_world((fused_xy[0], fused_xy[1], 0.0), ego_transform)
                 self._last_positions[track.track_id] = (timestamp, fused_world[:2])
+            if camera_xy is not None and ego_transform is not None and not track.predicted:
+                camera_world = _to_world((camera_xy[0], camera_xy[1], 0.0), ego_transform)
+                self._last_observed_camera_world[track.track_id] = (
+                    timestamp, camera_world[:2]
+                )
 
             matched_truth = None
             if track.detection_index is not None and track.detection_index in truth_by_box:
@@ -566,9 +684,12 @@ class PositioningEngine:
                 "bbox": {"x": int(track.x), "y": int(track.y),
                          "width": int(track.width), "height": int(track.height)},
                 "observed": not bool(track.predicted),
+                "radar_corrected": bool(getattr(track, "radar_corrected", False)),
+                "radar_correction_points": int(getattr(track, "radar_correction_points", 0)),
                 "missed_frames": int(track.missed_frames),
                 "camera_xy_ego_m": _xy(camera_xy),
                 "radar_xy_ego_m": _xy(radar_xy),
+                "radar_target_xy_ego_m": _xy(radar_target_xy),
                 "radar_range_m": radar_range,
                 "radar_range_rate_mps": radar_rate,
                 "radar_points": radar_point_count,
@@ -577,13 +698,19 @@ class PositioningEngine:
                 "radar_rejection_reason": radar_rejection_reason,
                 "radar_used": radar_xy is not None,
                 "camera_distance_m": camera_distance,
+                "raw_camera_distance_m": raw_camera_distance,
                 "radar_distance_m": radar_distance,
                 "estimated_distance_m": estimated_distance,
                 "distance_source": distance_source,
                 "distance_rejection_reason": distance_rejection_reason,
+                "prediction_jump_m": prediction_jump_m,
+                "prediction_jump_limit_m": prediction_jump_limit_m,
+                "prediction_pixel_sensitivity_m": prediction_pixel_sensitivity_m,
                 "fused_xy_ego_m": _xy(fused_xy),
-                "fusion_source": ("camera+radar" if camera_xy is not None and radar_xy is not None
-                                  else "radar" if radar_xy is not None else "camera_only"),
+                "fusion_source": ("camera+radar" if camera_xy is not None
+                                  and radar_target_xy is not None
+                                  else "radar" if radar_target_xy is not None
+                                  else "camera_only"),
                 "ground_truth_actor_id": gt_actor_id,
                 "ground_truth_xy_ego_m": _xy(gt_xy),
                 "ground_truth_iou": match_iou,
@@ -596,6 +723,12 @@ class PositioningEngine:
         for track_id in list(self._last_positions):
             if track_id not in active_track_ids:
                 self._last_positions.pop(track_id, None)
+        for track_id in list(self._last_observed_camera_world):
+            if track_id not in active_track_ids:
+                self._last_observed_camera_world.pop(track_id, None)
+        for track_id in list(self._track_radar_offsets_world):
+            if track_id not in active_track_ids:
+                self._track_radar_offsets_world.pop(track_id, None)
         summary = self.accuracy.update(estimate_rows, visible_truth, radar_delta_frames)
         return {
             "schema_version": 1,
