@@ -75,9 +75,9 @@ CARLA에서 **맑음·흐림·강한 비**와 **낮·해질녘·밤**을 조합�
 
 | 날씨 | 낮 | 해질녘 | 밤 |
 | --- | --- | --- | --- |
-| **맑음** | <img src="docs/images/weather/ClearNoon.jpg" width="220"><br>ClearNoon | <img src="docs/images/weather/ClearSunset.jpg" width="220"><br>ClearSunset | <img src="docs/images/weather/ClearNight.jpg" width="220"><br>ClearNight |
-| **흐림** | <img src="docs/images/weather/CloudyNoon.jpg" width="220"><br>CloudyNoon | <img src="docs/images/weather/CloudySunset.jpg" width="220"><br>CloudySunset | <img src="docs/images/weather/CloudyNight.jpg" width="220"><br>CloudyNight |
-| **강한 비** | <img src="docs/images/weather/HardRainNoon.jpg" width="220"><br>HardRainNoon | <img src="docs/images/weather/HardRainSunset.jpg" width="220"><br>HardRainSunset | <img src="docs/images/weather/HardRainNight.jpg" width="220"><br>HardRainNight |
+| **맑음** | <img src="docs/images/weather/ClearNoon.jpg" width="220"><br>맑음 낮 | <img src="docs/images/weather/ClearSunset.jpg" width="220"><br>맑음 낮 | <img src="docs/images/weather/ClearNight.jpg" width="220"><br>맑음 밤 |
+| **흐림** | <img src="docs/images/weather/CloudyNoon.jpg" width="220"><br>흐림 낮 | <img src="docs/images/weather/CloudySunset.jpg" width="220"><br>흐림 해질녁 | <img src="docs/images/weather/CloudyNight.jpg" width="220"><br>흐림 밤 |
+| **강한 비** | <img src="docs/images/weather/HardRainNoon.jpg" width="220"><br>강항 비 낮 | <img src="docs/images/weather/HardRainSunset.jpg" width="220"><br>강한 비 해질녘 | <img src="docs/images/weather/HardRainNight.jpg" width="220"><br>강한 비 밤 |
 
 각 조건에서 **약 2분씩 한 번, 순차적으로 수집**했으며, 동일한 저장 입력에 M1·M2·M3를 적용해 비교했습니다. 조건마다 주변 차량과 주행 장면·거리 분포가 달라, 조건 간 성능 차이를 날씨만의 영향으로 해석하지는 않습니다.
 <br><br>
