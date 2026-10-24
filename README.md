@@ -72,9 +72,9 @@ YOLO 차량 박스를 **클래스·박스 겹침 비율(IoU)·중심 거리**로
 
 ## 8. 실험 환경: 9개 날씨·시간대 조건
 
-CARLA에서 **맑음·흐림·강한 비**와 **낮·저녁·밤**을 조합한 9개 조건으로 데이터를 수집했습니다.
+CARLA에서 **맑음·흐림·강한 비**와 **낮·해질녘·밤**을 조합한 9개 조건으로 데이터를 수집했습니다.
 
-| 날씨 | 낮 | 저녁 | 밤 |
+| 날씨 | 낮 | 해질녘 | 밤 |
 | --- | --- | --- | --- |
 | 맑음 | <img src="docs/images/weather/ClearNoon.jpg" width="220"><br>ClearNoon | <img src="docs/images/weather/ClearSunset.jpg" width="220"><br>ClearSunset | <img src="docs/images/weather/ClearNight.jpg" width="220"><br>ClearNight |
 | 흐림 | <img src="docs/images/weather/CloudyNoon.jpg" width="220"><br>CloudyNoon | <img src="docs/images/weather/CloudySunset.jpg" width="220"><br>CloudySunset | <img src="docs/images/weather/CloudyNight.jpg" width="220"><br>CloudyNight |
