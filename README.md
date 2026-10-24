@@ -36,7 +36,7 @@ CARLA 시뮬레이터를 활용하면 실제 차량과 카메라, 시험 장소�
 
 ## 4. QT기반 대시보드
 
-https://github.com/user-attachments/assets/31890518-bb8a-4e5e-b2e6-1ce6a3347e5d
+https://github.com/user-attachments/assets/d4ec6abe-dcd2-4b13-9a5b-bee042edfc5c
 
 - **실시간 비교:** 원본 영상·YOLO 검출·영상 추적·레이더 보조 추적 결과와 차량 간 거리를 비교합니다.
 - **실험 제어:** 추적 유지 프레임, 레이더 위치 보정, 날씨별 수집 스케줄과 신호등 설정을 조절합니다.
