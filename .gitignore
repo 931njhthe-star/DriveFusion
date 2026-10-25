@@ -27,3 +27,4 @@ htmlcov/
 /docs/*
 !/docs/images/
 !/docs/images/**
+/samples/
