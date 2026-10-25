@@ -6,3 +6,21 @@ __pycache__/
 /data/
 /flow.png
 /실행법.txt
+
+# 임시 작업·테스트 디렉터리
+/tmp*/
+/tests/tmp*/
+
+# 테스트·분석 캐시
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 모델·추론 엔진 생성물
+*.engine
+*.wts
+
+
+/output/
+/tmp/
