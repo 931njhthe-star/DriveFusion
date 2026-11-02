@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/6b0777bf-e69e-44e2-9350-950728dbf9f5
 
 ## 5. Detector: YOLO11n
 
-<img width="768" height="512" alt="YOLO11n vehicle detection" src="https://github.com/user-attachments/assets/78480140-7f40-44a8-b3b3-11ededa59a98" />
+<img width="1536" alt="YOLO11n C++/CUDA detector workflow and Windows/Linux build overview" src="docs/images/yolo11n-detector-en.png" />
 
 YOLO11n inference runs through a **TensorRT engine and TensorRTx-based C++/CUDA DLL**, built separately for Windows and Linux.
 
