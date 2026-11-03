@@ -3,6 +3,8 @@
 
 DriveFusion is a CARLA-based system for **real-time vehicle detection, tracking, and inter-vehicle distance estimation using camera and radar sensors**. It integrates sensor acquisition, YOLO11n inference, tracking, sensor fusion, a Qt dashboard, recording, replay, and quantitative evaluation. Nine simulated weather/time-of-day conditions were used to examine accuracy, the benefits of radar assistance, and limitations.
 
+**Project page:** [DriveFusion — Real-Time Camera–Radar Perception](https://931njhthe-star.github.io/drivefusion/)
+
 ## Contents
 
 1. [System Overview and Key Findings](#1-system-overview-and-key-findings)
